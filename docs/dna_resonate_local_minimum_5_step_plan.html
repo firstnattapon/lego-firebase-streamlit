@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<!--
+  5-STEP PLANNER — HTML GUIDE
+  DNA Resonate Spectrum 0-1 — แก้ปัญหา Local Minimum
+  Self-contained, offline-ready. No external requests.
+-->
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>แผน 5 ขั้น: DNA Resonate Spectrum 0-1 — แก้ Local Minimum</title>
+<style>
+  :root{
+    --bg:#faf7f2; --ink:#2b2b2b; --muted:#6f6a63;
+    --gold:#b8894b; --deep:#7a4b2b; --line:#e6ddd0;
+    --card:#ffffff; --accent:#3d6b5e; --warn:#c0603a;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1c1a17; --ink:#ece6db; --muted:#a89f8f;
+      --gold:#d9a869; --deep:#f0c896; --line:#3a352c;
+      --card:#26221d; --accent:#6fae99; --warn:#e08a63;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#1c1a17; --ink:#ece6db; --muted:#a89f8f;
+    --gold:#d9a869; --deep:#f0c896; --line:#3a352c;
+    --card:#26221d; --accent:#6fae99; --warn:#e08a63;
+  }
+  :root[data-theme="light"]{
+    --bg:#faf7f2; --ink:#2b2b2b; --muted:#6f6a63;
+    --gold:#b8894b; --deep:#7a4b2b; --line:#e6ddd0;
+    --card:#ffffff; --accent:#3d6b5e; --warn:#c0603a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Sarabun","Segoe UI",system-ui,sans-serif;line-height:1.7}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 20px 80px}
+  header{text-align:center;padding:28px 0 8px;border-bottom:2px solid var(--gold)}
+  header h1{margin:0;font-size:1.7rem;color:var(--deep);letter-spacing:.5px}
+  header p{margin:6px 0 0;color:var(--muted)}
+  .goalbar{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--gold);
+    border-radius:10px;padding:16px 20px;margin:24px 0}
+  .goalbar b{color:var(--deep)}
+  .metric{display:inline-block;background:color-mix(in srgb, var(--gold) 15%, var(--card));
+    border-radius:8px;padding:4px 10px;margin:6px 6px 0 0;font-size:.9rem}
+  .step{margin:28px 0}
+  .step h2{display:flex;align-items:center;gap:12px;font-size:1.2rem;color:var(--deep);margin:0 0 10px}
+  .num{display:inline-flex;width:34px;height:34px;border-radius:50%;background:var(--gold);color:#2b2b2b;
+    align-items:center;justify-content:center;font-weight:700;flex:0 0 auto}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin:10px 0}
+  .card h3{margin:0 0 6px;font-size:1rem;color:var(--accent)}
+  .tag{font-size:.78rem;background:color-mix(in srgb, var(--accent) 15%, var(--card));color:var(--accent);
+    border-radius:6px;padding:2px 8px;margin-left:6px;white-space:nowrap}
+  .why{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:.92rem}
+  .evidence{margin:6px 0 0;font-size:.85rem;color:var(--muted);font-style:italic}
+  .eq{font-family:"Cascadia Code",Consolas,monospace;background:#2b2b2b;color:#f5e9d6;
+    border-radius:8px;padding:10px 14px;margin:8px 0;overflow-x:auto;font-size:.92rem}
+  .eq .lbl{color:var(--gold);display:block;font-size:.78rem;margin-bottom:2px;font-family:inherit}
+  .eq .interp{color:#c9c2b3;display:block;font-size:.78rem;margin-top:4px;font-family:inherit}
+  table{width:100%;border-collapse:collapse;margin:8px 0}
+  .tablewrap{overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;font-size:.88rem}
+  th{background:color-mix(in srgb, var(--gold) 15%, var(--card));color:var(--deep)}
+  .loop{background:color-mix(in srgb, var(--warn) 8%, var(--bg));border:1px dashed var(--warn);
+    border-radius:10px;padding:16px 20px;margin:14px 0}
+  .ladder td:first-child{font-weight:600}
+  .note{background:color-mix(in srgb, var(--accent) 10%, var(--card));border-left:4px solid var(--accent);
+    border-radius:8px;padding:10px 14px;margin:10px 0;font-size:.9rem}
+  .rank1{border-left:4px solid var(--gold)}
+  footer{text-align:center;color:var(--muted);font-size:.85rem;margin-top:40px}
+  .assum{font-size:.88rem;color:var(--muted)}
+  .assum li{margin:4px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🧬 DNA Resonate Spectrum 0-1 — แก้ปัญหา Local Minimum</h1>
+    <p>แผน 5 ขั้น · Goals → Problems → Diagnosis → Design → Do it</p>
+  </header>
+
+  <!-- STEP 1 -->
+  <div class="goalbar">
+    <b>🎯 เป้าหมาย (Step 1):</b> ยกระดับคะแนน in-sample resonance (net จริงต่อ net เพดานทฤษฎีต่อ window สเกล 0-1) ของ Hybrid Multi-Mutation optimizer ให้สูงขึ้นกว่าปัจจุบัน โดยคงหลักการเดิมทั้งหมด — fitness function (net เหนือ log reference), DNA gate array 0/1, และ <code>[len][value]</code> seed-chain encoding ที่ <code>dna_engine.py</code> (live) ต้อง decode ได้ทันทีโดยไม่ต้องแก้ไข พร้อมย้ายความสามารถ tuning มาให้ใช้งานได้จาก repo lego-firebase-streamlit<br>
+    <span class="metric">ตัวชี้วัด: Resonance Spectrum Score = Σnet_w / Σceiling_w</span>
+    <span class="metric">ปัจจุบัน: ยังไม่วัด (TBD — ต้องรัน baseline ก่อน)</span>
+    <span class="metric">เป้า: 0.90 (สมมติฐาน)</span>
+    <span class="metric">ระยะเวลา: 10 วันทำการ</span>
+    <div class="note">
+      <b>เกณฑ์สำเร็จ:</b>
+      <ol style="margin:6px 0 0;padding-left:18px">
+        <li>Global resonance score สูงกว่า baseline greedy เดิมทุก ticker (Δscore ≥ 0 เสมอ)</li>
+        <li>DNA ที่ tune ได้ decode ผ่าน <code>dna_engine.py</code> เดิมตรงบิตต่อบิต 100%</li>
+        <li>ปิดฟีเจอร์ใหม่ (num_restarts=1, sa_T0=0) แล้วผลต้องเหมือนโค้ด greedy เดิมทุกประการ (regression guard)</li>
+        <li>มีหน้า tuning ใช้งานได้จาก repo lego-firebase-streamlit พร้อม dashboard resonance score</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- STEP 2 -->
+  <div class="step">
+    <h2><span class="num">2</span> Problems — ช่องว่างที่ขวางอยู่</h2>
+
+    <div class="card">
+      <h3>P1 — Greedy accept-only, single-champion hill-climb <span class="tag">severity 5/5</span></h3>
+      <p>รับเฉพาะ mutation ที่ดีกว่าเท่านั้น (<code>generate_actions_hybrid_multi_mutation :337-344</code>) ทำให้ไต่ไม่พ้นหลุมท้องถิ่นแรกที่เจอ</p>
+      <p class="evidence">Gap: โอกาสพลาด global optimum ต่อ window ~15-25% ของ resonance score</p>
+    </div>
+
+    <div class="card">
+      <h3>P2 — สำรวจ basin เดียว <span class="tag">severity 4/5</span></h3>
+      <p>Phase 1 (<code>find_best_seed_for_window :242-271</code>) เก็บ base seed ที่ดีที่สุดตัวเดียวจาก 1000 seeds แล้วทิ้ง basin อื่นทั้งหมด</p>
+      <p class="evidence">Gap: จำกัดการสำรวจเหลือ 1 ใน 1000 เส้นทางที่เป็นไปได้</p>
+    </div>
+
+    <div class="card">
+      <h3>P3 — Mutation rate คงที่ 10% <span class="tag">severity 3/5</span></h3>
+      <p>ไม่ปรับตามระยะการวิวัฒน์ (early vs late) จำกัดความหลากหลายของ challenger ในรอบท้าย</p>
+    </div>
+
+    <div class="card">
+      <h3>P4 — จำนวนรอบ mutation ตายตัว <span class="tag">severity 2/5</span></h3>
+      <p><code>num_mutations=5</code> ไม่มีเงื่อนไข convergence/patience — รอบที่ไม่ดีขึ้นก็ยังวนต่อจนครบ</p>
+    </div>
+
+    <div class="card">
+      <h3>P5 — Tuning อยู่คนละ repo กับ dashboard <span class="tag">severity 3/5</span></h3>
+      <p>Optimizer อยู่ที่ streamlit-example-1 ส่วน dashboard เป้าหมายอยู่ lego-firebase-streamlit — ต้องสลับ repo เพื่อ tune แล้วโหลดผลมาดู</p>
+    </div>
+
+    <div class="card">
+      <h3>P6 — Tie-order nondeterministic <span class="tag">severity 2/5</span></h3>
+      <p>การเลือก seed ที่ดีที่สุดผูกกับลำดับ thread เสร็จ (<code>as_completed</code>, :262-264, :295-297) รบกวนความน่าเชื่อถือของการวัด A/B</p>
+    </div>
+  </div>
+
+  <!-- STEP 3 -->
+  <div class="step">
+    <h2><span class="num">3</span> Diagnosis — รากของปัญหา</h2>
+
+    <div class="card">
+      <h3>RC1 (→P1) — Acceptance rule เป็น strict '>' เท่านั้น <span class="tag">น้ำหนัก w = 0.7</span></h3>
+      <ol class="why">
+        <li>ทำไมติดหลุม? เพราะรับเฉพาะที่ดีกว่า</li>
+        <li>ทำไมรับเฉพาะดีกว่า? เพราะออกแบบเป็น greedy hill-climb ไม่ใช่ metaheuristic</li>
+        <li>ทำไมเลือก greedy? เพราะง่าย เร็ว deterministic แต่ไม่ทนต่อ local minimum</li>
+      </ol>
+      <p class="evidence">หลักฐาน: โค้ด :341 <code>if mutated_net > current_best_net:</code> เป็นเงื่อนไขเดียวที่ตัดสินรับ/ไม่รับ</p>
+    </div>
+
+    <div class="card">
+      <h3>RC2 (→P1) — ไม่มี temperature/annealing schedule <span class="tag">น้ำหนัก w = 0.3</span></h3>
+      <ol class="why"><li>ทำไมไม่มีกลไกลดความเสี่ยงตามเวลา? เพราะไม่เคยออกแบบ SA ไว้ตั้งแต่ต้น</li></ol>
+      <p class="evidence">หลักฐาน: ไม่พบตัวแปร temperature/schedule ในไฟล์</p>
+    </div>
+
+    <div class="card">
+      <h3>RC3 (→P2) — Reduction เป็น single-max ไม่ใช่ top-K <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why"><li>ทำไมสำรวจ basin เดียว? เพราะ reduction จาก 1000 seed เหลือ argmax ตัวเดียวทันที ไม่เก็บอันดับรอง</li></ol>
+      <p class="evidence">หลักฐาน: โค้ด :262-264 เก็บเฉพาะค่า max สุดท้าย</p>
+    </div>
+
+    <div class="card">
+      <h3>RC4 (→P3) — mutation_rate เป็นพารามิเตอร์ตัวเดียวคงที่ <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why"><li>ทำไมคงที่? เพราะ config เก็บเป็นค่าเดียว ไม่ผูกกับรอบ (round index) ไม่รองรับ schedule</li></ol>
+      <p class="evidence">หลักฐาน: <code>load_config() :74-82</code> กำหนด mutation_rate เป็นตัวเลขเดียว</p>
+    </div>
+
+    <div class="card">
+      <h3>RC5 (→P4) — Loop control ตายตัว ไม่มี patience counter <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why"><li>ทำไมไม่หยุดเมื่อไม่ดีขึ้น? เพราะไม่มีตัวแปรติดตามจำนวนรอบที่ไม่ดีขึ้นติดกัน</li></ol>
+      <p class="evidence">หลักฐาน: โค้ด :337 วนลูปตายตัวตามจำนวนรอบที่ config กำหนด</p>
+    </div>
+
+    <div class="card">
+      <h3>RC6 (→P5) — โปรเจกต์แยก repo ตั้งแต่ต้น <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why"><li>ทำไมอยู่คนละที่? เพราะ dashboard repo ออกแบบให้อ่านอย่างเดียวจาก Firebase แต่ optimizer พัฒนาแยกในโปรเจกต์วิจัย</li></ol>
+      <p class="evidence">หลักฐาน: lego-firebase-streamlit มีเพียง streamlit_app.py 93 บรรทัด อ่าน Firebase RTDB อย่างเดียว ไม่มีโค้ด optimizer</p>
+    </div>
+
+    <div class="card">
+      <h3>RC7 (→P6) — Reduce ผลจาก thread pool ไม่ tie-break กับ seed <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why"><li>ทำไมไม่ deterministic? เพราะลำดับงานที่เธรดทำเสร็จไม่คงที่ทุกครั้ง (as_completed)</li></ol>
+      <p class="evidence">หลักฐาน: โค้ด :262-264, :295-297 ใช้ strict <code>&gt;</code> เทียบทีละผลโดยไม่ tie-break</p>
+    </div>
+  </div>
+
+  <!-- STEP 4 -->
+  <div class="step">
+    <h2><span class="num">4</span> Design — มาตรการ (จัดอันดับด้วย π = Δ/c)</h2>
+    <div class="tablewrap">
+    <table>
+      <tr><th>อันดับ</th><th>มาตรการ</th><th>ยิงที่</th><th>Δ (ผล)</th><th>c (ต้นทุน ชม.)</th><th>π = Δ/c</th></tr>
+      <tr class="rank1"><td>1</td><td><b>S_B</b> — Top-K multi-restart</td><td>RC3</td><td>+15%</td><td>4</td><td>3.75</td></tr>
+      <tr><td>2</td><td><b>S_A</b> — SA acceptance + best-prefix emission</td><td>RC1</td><td>+11.5%</td><td>4</td><td>2.9</td></tr>
+      <tr><td>3</td><td><b>S_C</b> — Patience + diversity injection</td><td>RC4, RC5</td><td>+3.5%</td><td>2</td><td>1.75</td></tr>
+      <tr><td>4</td><td><b>S_D</b> — Resonance dashboard + baseline A/B</td><td>RC1, RC3 (measurement)</td><td>enabler</td><td>3</td><td>infra</td></tr>
+      <tr><td>5</td><td><b>S_E</b> — Determinism tie-break hardening</td><td>RC7</td><td>enabler</td><td>3</td><td>infra</td></tr>
+      <tr><td>6</td><td><b>S_F</b> — พอร์ตหน้า tuning เข้า lego-firebase-streamlit</td><td>RC6</td><td>enabler</td><td>6</td><td>infra</td></tr>
+    </table>
+    </div>
+    <div class="note">
+      <b>ทำไมปลอดภัย:</b> ตั้ง <code>num_restarts=1, sa_T0=0</code> = โค้ด greedy เดิมทุกบิต → ผลลัพธ์ใหม่ ≥ ผลเดิมเสมอ (regression guard โดยธรรมชาติของการออกแบบ)
+      DNA ที่ปล่อยออกยังอยู่ในรูป <code>[length, mutation_rate, dna_seed, *mutation_seeds]</code> เดิม — <b>ไม่ต้องแก้ dna_engine.py ฝั่ง live เลย</b>
+      (best-prefix emission: ทุก prefix ของ accepted-seed list decode ตรงกับ champion กลางทางจริง จึงตัดเอาเฉพาะ prefix ที่คะแนนดีที่สุดไปปล่อยได้)
+    </div>
+  </div>
+
+  <!-- STEP 5 -->
+  <div class="step">
+    <h2><span class="num">5</span> Do it — ลงมือ + วัดผล</h2>
+    <div class="tablewrap">
+    <table>
+      <tr><th>การกระทำ</th><th>ผู้รับผิดชอบ</th><th>เริ่ม</th><th>จบ</th><th>ขึ้นกับ</th></tr>
+      <tr><td>S_E — แก้ tie-break ให้ order-independent</td><td>dev</td><td>d1</td><td>d1</td><td>—</td></tr>
+      <tr><td>S_B — select_top_k_base_seeds() + วน K basin</td><td>dev</td><td>d2</td><td>d3</td><td>S_E</td></tr>
+      <tr><td>S_A — evolve_chain_annealed() (SA + best-prefix), ตรวจ decode fidelity</td><td>dev</td><td>d3</td><td>d5</td><td>S_B</td></tr>
+      <tr><td>S_C — patience counter + สลับ basin เมื่อ stall</td><td>dev</td><td>d5</td><td>d5</td><td>S_A</td></tr>
+      <tr><td>S_D — compute_resonance_scores() + ตาราง UI เทียบ baseline vs upgraded</td><td>dev</td><td>d6</td><td>d7</td><td>S_A, S_B, S_C</td></tr>
+      <tr><td>S_F — พอร์ตหน้า tuning เข้า lego-firebase-streamlit พร้อม export DNA string</td><td>dev</td><td>d7</td><td>d9</td><td>S_D</td></tr>
+      <tr><td>รัน A/B ทุก ticker รายงาน Δnet_w และ Δscore รวม</td><td>dev</td><td>d9</td><td>d10</td><td>S_F</td></tr>
+    </table>
+    </div>
+
+    <h3 style="color:var(--accent);margin-top:16px">สมการวัดผล &amp; ประเมินผล</h3>
+    <div class="eq"><span class="lbl">Window resonance score (KPI หลัก)</span>score_w = clamp(net_w / ceiling_w, 0, 1)  ·  ถ้า ceiling_w ≤ ε_c: score_w = 1 เมื่อ net_w ≥ 0 มิฉะนั้น 0<span class="interp">สัดส่วนของ wealth ที่ optimizer เก็บได้เทียบเพดาน perfect-foresight ต่อ window</span></div>
+    <div class="eq"><span class="lbl">Global Resonance Score</span>Score = Σ_w(net_w) / Σ_w(ceiling_w)&nbsp;&nbsp;&nbsp;target ≥ 0.90<span class="interp">คะแนนรวมทุก window ถ่วงน้ำหนักด้วยทุน — headline KPI</span></div>
+    <div class="eq"><span class="lbl">Gap-Closed %</span>gap_closed = (Score_upgraded − Score_greedy) / (1 − Score_greedy)&nbsp;&nbsp;&nbsp;target ≥ 0.15<span class="interp">วัดว่ามาตรการใหม่ปิดช่องว่างจาก baseline ไปได้เท่าไหร่</span></div>
+    <div class="eq"><span class="lbl">Decode Fidelity Rate</span>fidelity = (จำนวน window ที่ decode_dna(emitted) == champion บิตต่อบิต) / (จำนวน window ทั้งหมด)&nbsp;&nbsp;&nbsp;target = 1.0<span class="interp">ยืนยันว่า DNA ที่ปล่อยออก decode ได้ตรงด้วย dna_engine.py เดิม 100%</span></div>
+    <div class="eq"><span class="lbl">Goal attainment</span>A = G_achieved / G_target<span class="interp">A ≥ 1 คือบรรลุเป้า Global Resonance Score</span></div>
+    <div class="eq"><span class="lbl">Progress ratio</span>P = (G_n − G_0) / (G_target − G_0)<span class="interp">สัดส่วนระยะทางที่เดินมาแล้วจาก baseline สู่เป้า</span></div>
+
+    <!-- CONTROL LOOP -->
+    <div class="loop">
+      <h3 style="margin-top:0;color:var(--warn)">🔁 Control loop — เมื่อยังไม่บรรลุเป้าหมาย</h3>
+      <div class="eq"><span class="lbl">สมการควบคุม (error)</span>e_n = G_target − G_n</div>
+      <div class="eq"><span class="lbl">อัตราการลู่เข้า</span>r_n = |e_n| / |e_(n−1)|</div>
+      <p><b>เงื่อนไขหยุด:</b> ถ้า |e_n| ≤ ε = 0.02 → บรรลุเป้าหมาย · gain K = 0.5 · n_max = 5 รอบ · ถ้ายังไม่ถึง → ไต่ escalation ladder:</p>
+      <div class="tablewrap">
+      <table class="ladder">
+        <tr><th>สถานการณ์</th><th>แปลว่า</th><th>วนกลับไป</th></tr>
+        <tr><td>r_n &lt; 1 (ช่องว่างหด)</td><td>แผนได้ผล ต้องทำซ้ำ</td><td>Step 5 · เพิ่ม num_restarts หรือปรับ T0/patience ตาม u_(n+1)=K·e_n</td></tr>
+        <tr><td>r_n ≈ 1 (นิ่ง)</td><td>น้ำหนักรากปัญหาผิด (RC1 vs RC3)</td><td>Step 3 · วินิจฉัยใหม่ จัดอันดับ S_A/S_B/S_C ใหม่</td></tr>
+        <tr><td>r_n &gt; 1 (แย่ลง)</td><td>ระบุปัญหาผิด</td><td>Step 2 · ทบทวนหา basin/parameter อื่นที่ยังไม่ระบุ</td></tr>
+        <tr><td>หลายรอบยังห่างมาก</td><td>เป้าไม่สมจริง</td><td>Step 1 · ปรับ target 0.90 หรือขยาย horizon ตาม baseline จริง</td></tr>
+      </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <h2><span class="num">!</span> ข้อสมมติฐาน</h2>
+    <ul class="assum">
+      <li>current (baseline score) ตั้งเป็น TBD เพราะยังไม่เคยวัด resonance score ของโค้ด greedy ปัจจุบันเป็นตัวเลข — ต้องรัน baseline (num_restarts=1, sa_T0=0) ก่อน</li>
+      <li>target 0.90 เป็นค่าสมมติฐานเบื้องต้น รอปรับหลังเห็น baseline จริงในรอบแรกของ control loop</li>
+      <li>expected_effect (Δ) ของ S_B/S_A/S_C เป็นค่าประมาณจากลักษณะของ intervention ไม่ใช่ผลวัดจริง ใช้จัดลำดับ priority เบื้องต้นเท่านั้น</li>
+      <li>cost (c) หน่วยเป็นชั่วโมงทำงานโดยประมาณของ 1 dev</li>
+      <li>แผนนี้ครอบคลุมเฉพาะการออกแบบ — ยังไม่ implement โค้ด optimizer จริงในรอบนี้ตามที่ตกลงกับผู้ใช้</li>
+    </ul>
+  </div>
+
+  <footer>สร้างด้วย five-step-planner · Goals → Problems → Diagnosis → Design → Do it</footer>
+</div>
+</body>
+</html>

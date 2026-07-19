@@ -1,0 +1,257 @@
+{
+  "framework": "5-step-process",
+  "language": "th",
+  "step_1_goals": {
+    "raw_goal": "กลับมาใช้การจูนความถี่ตลาดด้วยหลักการเดิม dna resonate Spectrum 0-1 (in-sample) แต่อัพเกรดแก้ปัญหาการติด Local Minimum",
+    "refined_goal": "ยกระดับคะแนน in-sample resonance (net จริงต่อ net เพดานทฤษฎีต่อ window, สเกล 0-1) ของ Hybrid Multi-Mutation optimizer ให้สูงขึ้นกว่าปัจจุบัน โดยคงหลักการเดิมทั้งหมด — fitness function (net เหนือ log reference), DNA gate array 0/1, และ [len][value] seed-chain encoding ที่ dna_engine.py (live) ต้อง decode ได้ทันทีโดยไม่ต้องแก้ไข พร้อมย้ายความสามารถ tuning มาให้ใช้งานได้จาก repo lego-firebase-streamlit",
+    "target_metric": {
+      "name": "Resonance Spectrum Score = Σ(net_w) / Σ(ceiling_w) ต่อชุด window ทั้งหมด",
+      "current": null,
+      "target": 0.90,
+      "unit": "score (0-1)",
+      "horizon": "10 วันทำการ (2 สัปดาห์)"
+    },
+    "success_criteria": [
+      "Global resonance score (Σnet_w/Σceiling_w) สูงกว่า baseline greedy เดิมในทุก ticker ที่ทดสอบ (Δscore ≥ 0 เสมอ)",
+      "ทุก DNA ที่ tune ออกมา decode ผ่าน lego-firebase/dna_engine.py เดิมได้ตรงบิตต่อบิต (decode fidelity = 100%) โดยไม่แก้โค้ด dna_engine.py",
+      "เมื่อปิดฟีเจอร์ใหม่ (num_restarts=1, sa_T0=0) ผลลัพธ์ต้องเหมือนโค้ด greedy เดิมทุกประการ (regression guard)",
+      "มีหน้า tuning ใช้งานได้จาก repo lego-firebase-streamlit พร้อม dashboard แสดง resonance score ต่อ window"
+    ]
+  },
+  "step_2_problems": [
+    {
+      "id": "P1",
+      "description": "Greedy accept-only, single-champion hill-climb (generate_actions_hybrid_multi_mutation :337-344 ใน streamlit-example-1/pages/4_🧬_Hybrid_Multi_Mutation.py) รับเฉพาะ mutation ที่ดีกว่าเท่านั้น ทำให้ไต่ไม่พ้นหลุมท้องถิ่นแรกที่เจอ",
+      "gap_value": "โอกาสพลาด global optimum ต่อ window ~15-25% ของ resonance score",
+      "severity": 5
+    },
+    {
+      "id": "P2",
+      "description": "Phase 1 (find_best_seed_for_window :242-271) เก็บ base seed ที่ดีที่สุดเพียงตัวเดียวจาก 1000 seeds แล้วทิ้ง basin อื่นทั้งหมด ทั้งที่บาง basin อาจนำไปสู่ยอดที่สูงกว่าหลัง mutation",
+      "gap_value": "จำกัดการสำรวจเหลือ 1 ใน 1000 เส้นทางที่เป็นไปได้",
+      "severity": 4
+    },
+    {
+      "id": "P3",
+      "description": "Mutation rate คงที่ 10% ตลอดทุกรอบ ไม่ปรับตามระยะการวิวัฒน์ (early vs late)",
+      "gap_value": "ไม่วัดตรงเป็นตัวเลข แต่จำกัดความหลากหลายของ challenger ในรอบท้าย",
+      "severity": 3
+    },
+    {
+      "id": "P4",
+      "description": "จำนวนรอบ mutation ตายตัว (num_mutations=5) ไม่มีเงื่อนไข convergence/patience — รอบที่ไม่ดีขึ้นก็ยังวนต่อจนครบ ไม่ได้ใช้เวลาไปสำรวจ basin อื่น",
+      "gap_value": "รอบเปล่าที่เสียไปโดยไม่ได้ข้อมูลใหม่",
+      "severity": 2
+    },
+    {
+      "id": "P5",
+      "description": "Tuning/optimizer อยู่คนละ repo (streamlit-example-1) กับ dashboard เป้าหมาย (lego-firebase-streamlit) — ผู้ใช้ต้องสลับ repo เพื่อ tune แล้วโหลดผลมาดู",
+      "gap_value": "workflow แยก 2 ที่ ไม่มี single entry point",
+      "severity": 3
+    },
+    {
+      "id": "P6",
+      "description": "การเลือก seed ที่ดีที่สุดใน evaluate_seed_batch reduction (:262-264, :295-297) ผูกกับลำดับ thread เสร็จ (as_completed) ทำให้ผลไม่ deterministic เวลาเทียบ A/B",
+      "gap_value": "รบกวนความน่าเชื่อถือของการวัด Δnet/Δscore ระหว่าง baseline กับของใหม่",
+      "severity": 2
+    }
+  ],
+  "step_3_diagnosis": [
+    {
+      "problem_id": "P1",
+      "root_causes": [
+        {
+          "id": "RC1",
+          "cause": "Acceptance rule เป็น strict '>' เท่านั้น ไม่มีกลไกยอมรับ challenger ที่แย่กว่าเพื่อหนีหลุม",
+          "why_chain": [
+            "ทำไมติดหลุม? เพราะรับเฉพาะที่ดีกว่า",
+            "ทำไมรับเฉพาะดีกว่า? เพราะออกแบบเป็น greedy hill-climb ไม่ใช่ metaheuristic",
+            "ทำไมเลือก greedy? เพราะง่าย เร็ว deterministic แต่ไม่ทนต่อ local minimum"
+          ],
+          "impact_weight": 0.7,
+          "evidence": "โค้ด :341 `if mutated_net > current_best_net:` เป็นเงื่อนไขเดียวที่ตัดสินรับ/ไม่รับ"
+        },
+        {
+          "id": "RC2",
+          "cause": "ไม่มี temperature/annealing schedule ที่ค่อยๆลดโอกาสรับของแย่ลงตามรอบ",
+          "why_chain": [
+            "ทำไมไม่มีกลไกลดความเสี่ยงตามเวลา? เพราะไม่เคยออกแบบ SA ไว้ตั้งแต่ต้น"
+          ],
+          "impact_weight": 0.3,
+          "evidence": "ไม่พบตัวแปร temperature/schedule ในไฟล์"
+        }
+      ]
+    },
+    {
+      "problem_id": "P2",
+      "root_causes": [
+        {
+          "id": "RC3",
+          "cause": "find_best_seed_for_window ลด (reduce) ผลจาก 1000 seed เหลือ argmax ตัวเดียวทันที ไม่เก็บอันดับรอง",
+          "why_chain": [
+            "ทำไมสำรวจ basin เดียว? เพราะ reduction เป็น single-max ไม่ใช่ top-K"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "โค้ด :262-264 เก็บเฉพาะค่า max สุดท้าย"
+        }
+      ]
+    },
+    {
+      "problem_id": "P3",
+      "root_causes": [
+        {
+          "id": "RC4",
+          "cause": "mutation_rate เป็นพารามิเตอร์ตัวเดียวคงที่ทั้ง session ไม่ผูกกับรอบ (round index)",
+          "why_chain": [
+            "ทำไมคงที่? เพราะ config เก็บเป็นค่าเดียว ไม่รองรับ schedule"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "load_config() :74-82 กำหนด mutation_rate เป็นตัวเลขเดียว"
+        }
+      ]
+    },
+    {
+      "problem_id": "P4",
+      "root_causes": [
+        {
+          "id": "RC5",
+          "cause": "Loop control เป็น `for round in range(num_mutations)` ตายตัว ไม่มีตัวนับ patience/stall",
+          "why_chain": [
+            "ทำไมไม่หยุดเมื่อไม่ดีขึ้น? เพราะไม่มีตัวแปรติดตามจำนวนรอบที่ไม่ดีขึ้นติดกัน"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "โค้ด :337 วนลูปตายตัวตามจำนวนรอบที่ config กำหนด"
+        }
+      ]
+    },
+    {
+      "problem_id": "P5",
+      "root_causes": [
+        {
+          "id": "RC6",
+          "cause": "โปรเจกต์ถูกแยก repo ตั้งแต่ต้น (research playground vs. read-only dashboard) โดยไม่มีการพอร์ตโมดูล optimizer ข้ามมา",
+          "why_chain": [
+            "ทำไมอยู่คนละที่? เพราะ dashboard repo ถูกออกแบบให้อ่านอย่างเดียวจาก Firebase แต่ optimizer พัฒนาแยกในโปรเจกต์วิจัย"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "lego-firebase-streamlit มีเพียง streamlit_app.py 93 บรรทัด อ่าน Firebase RTDB อย่างเดียว ไม่มีโค้ด optimizer"
+        }
+      ]
+    },
+    {
+      "problem_id": "P6",
+      "root_causes": [
+        {
+          "id": "RC7",
+          "cause": "การ reduce ผลลัพธ์จาก thread pool ใช้ `as_completed` โดยไม่ tie-break กับค่า seed เมื่อ net เท่ากัน",
+          "why_chain": [
+            "ทำไมไม่ deterministic? เพราะลำดับงานที่เธรดทำเสร็จไม่คงที่ทุกครั้ง"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "โค้ด :262-264, :295-297 ใช้ strict `>` เทียบทีละผลจาก as_completed"
+        }
+      ]
+    }
+  ],
+  "step_4_design": [
+    {
+      "id": "S_E",
+      "targets_root_cause": "RC7",
+      "intervention": "แก้ tie-break ให้ order-independent: เปลี่ยนเงื่อนไขเป็น `net > best or (net == best and seed < best_seed)` ทั้งใน evaluate_seed_batch reduction และ mutation-seed reduction — เป็นฐาน infra ก่อนวัด A/B",
+      "expected_effect": "infra enabler (ทำให้วัด Δnet/Δscore เชื่อถือได้ ไม่ใช่ตัวเลขปิดเป้าโดยตรง)",
+      "cost": 3,
+      "priority_score": null,
+      "rank": 5
+    },
+    {
+      "id": "S_B",
+      "targets_root_cause": "RC3",
+      "intervention": "Top-K multi-restart: สร้าง select_top_k_base_seeds() ให้เก็บ K base seed ที่ดีที่สุด (ไม่ใช่ตัวเดียว) แล้ววิวัฒน์แยก chain ต่อ basin จากนั้นเลือก global best ข้าม chain — reuse การ sweep 1000 seed เดิมที่มีอยู่แล้ว",
+      "expected_effect": 15,
+      "cost": 4,
+      "priority_score": 3.75,
+      "rank": 1
+    },
+    {
+      "id": "S_A",
+      "targets_root_cause": "RC1",
+      "intervention": "Simulated Annealing acceptance + best-prefix emission: แทนที่ `if mutated_net > current_best_net` ด้วย Metropolis acceptance `exp(Δ/T)`, T ลดลงตามรอบ (T = T0·α^round); เก็บ prefix ของ accepted-seed list ที่จุดคะแนนดีที่สุดไว้ emit เป็น DNA เพื่อให้ decode_dna เดิมยัง replay ได้ตรงบิต",
+      "expected_effect": 11.5,
+      "cost": 4,
+      "priority_score": 2.9,
+      "rank": 2
+    },
+    {
+      "id": "S_C",
+      "targets_root_cause": "RC4_RC5",
+      "intervention": "Patience + diversity injection: แทนลูปตายตัวด้วยการนับรอบที่ไม่ดีขึ้นติดกัน (patience) เมื่อครบให้สลับไป base seed อันดับถัดไปใน top-K แทนวนต่อในหลุมเดิม",
+      "expected_effect": 3.5,
+      "cost": 2,
+      "priority_score": 1.75,
+      "rank": 3
+    },
+    {
+      "id": "S_D",
+      "targets_root_cause": "RC1_RC3",
+      "intervention": "Resonance dashboard: เพิ่ม compute_resonance_scores() วัด score_w = clamp(net_w/ceiling_w, 0, 1) ต่อ window เทียบเพดาน perfect-foresight, แสดงตารางเทียบ baseline greedy vs. อัพเกรดใหม่ (Δnet_w, Δscore_w) ในหน้า UI",
+      "expected_effect": "infra enabler (จำเป็นสำหรับตัดสิน priority และยืนยัน regression guard)",
+      "cost": 3,
+      "priority_score": null,
+      "rank": 4
+    },
+    {
+      "id": "S_F",
+      "targets_root_cause": "RC6",
+      "intervention": "พอร์ตโมดูล optimizer (fitness, encoder/decoder, evolve_chain_annealed) เป็นหน้าใหม่ในหน้า Streamlit ของ lego-firebase-streamlit เช่น pages/1_🧬_DNA_Tuner.py พร้อมปุ่ม export DNA string ที่ตั้งเป็น LEGO_DNA_CODE ได้ทันที",
+      "expected_effect": "infra enabler (รวม workflow ให้ tune ได้จาก repo เดียวกับ dashboard)",
+      "cost": 6,
+      "priority_score": null,
+      "rank": 6
+    }
+  ],
+  "step_5_do_it": {
+    "action_plan": [
+      { "action": "S_E — แก้ tie-break ให้ order-independent ในทั้งสอง reduction", "owner": "dev", "start": "d1", "end": "d1", "depends_on": [] },
+      { "action": "S_B — เขียน select_top_k_base_seeds() + ปรับ generate_actions_hybrid_multi_mutation ให้วน K basin", "owner": "dev", "start": "d2", "end": "d3", "depends_on": ["S_E"] },
+      { "action": "S_A — เขียน evolve_chain_annealed() (SA acceptance + best-prefix emission), ตรวจ decode fidelity ด้วย dna_engine.decode_dna", "owner": "dev", "start": "d3", "end": "d5", "depends_on": ["S_B"] },
+      { "action": "S_C — เพิ่ม patience counter + สลับ basin เมื่อ stall", "owner": "dev", "start": "d5", "end": "d5", "depends_on": ["S_A"] },
+      { "action": "S_D — เพิ่ม compute_resonance_scores() + ตาราง UI เทียบ baseline vs. upgraded", "owner": "dev", "start": "d6", "end": "d7", "depends_on": ["S_A", "S_B", "S_C"] },
+      { "action": "S_F — พอร์ตหน้า tuning เข้า lego-firebase-streamlit พร้อม export DNA string", "owner": "dev", "start": "d7", "end": "d9", "depends_on": ["S_D"] },
+      { "action": "รัน A/B (num_restarts=1, sa_T0=0 คือ baseline) เทียบทุก ticker ที่มีอยู่ รายงาน Δnet_w และ Δscore รวม", "owner": "dev", "start": "d9", "end": "d10", "depends_on": ["S_F"] }
+    ],
+    "measurement": {
+      "kpis": [
+        { "name": "Global Resonance Score", "formula": "Score = Σ_w(net_w) / Σ_w(ceiling_w)", "target": 0.90, "frequency": "ทุกครั้งที่รัน tuning batch" },
+        { "name": "Gap-Closed %", "formula": "gap_closed = (Score_upgraded − Score_greedy) / (1 − Score_greedy)", "target": 0.15, "frequency": "ทุกครั้งที่เทียบ A/B" },
+        { "name": "Decode Fidelity Rate", "formula": "fidelity = (จำนวน window ที่ decode_dna(emitted) == champion บิตต่อบิต) / (จำนวน window ทั้งหมด)", "target": 1.0, "frequency": "ทุกครั้งที่รัน tuning batch" }
+      ],
+      "evaluation_equations": [
+        { "name": "Window resonance score", "formula": "score_w = clamp(net_w / ceiling_w, 0, 1); ถ้า ceiling_w ≤ ε_c ให้ score_w = 1 เมื่อ net_w ≥ 0 มิฉะนั้น 0", "interpret": "สัดส่วนของ wealth ที่ optimizer เก็บได้เทียบเพดาน perfect-foresight ต่อ window" },
+        { "name": "Goal attainment", "formula": "A = G_achieved / G_target", "interpret": "A ≥ 1 คือบรรลุเป้า Global Resonance Score" },
+        { "name": "Progress ratio", "formula": "P = (G_n − G_0) / (G_target − G_0)", "interpret": "สัดส่วนระยะทางที่เดินมาแล้วจาก baseline สู่เป้า" }
+      ],
+      "loop": {
+        "control_equation": "e_n = G_target - G_n",
+        "convergence_rate": "r_n = |e_n| / |e_{n-1}|",
+        "stop_condition": "|e_n| <= epsilon",
+        "epsilon": 0.02,
+        "gain_K": 0.5,
+        "correction": "u_{n+1} = K * e_n",
+        "n_max": 5,
+        "escalation_ladder": [
+          { "if": "r_n < 1 (shrinking, not yet at epsilon)", "loop_back_to": "step_5", "action": "ทำ cycle ต่อ: เพิ่ม num_restarts หรือ ปรับ T0/patience ตาม u_{n+1}=K·e_n" },
+          { "if": "r_n ~ 1 (stalled)", "loop_back_to": "step_3", "action": "วินิจฉัยใหม่ — น้ำหนัก root cause (RC1 vs RC3) อาจผิดสัดส่วน ปรับแล้วจัดอันดับ S_A/S_B/S_C ใหม่" },
+          { "if": "r_n > 1 (diverging)", "loop_back_to": "step_2", "action": "ทบทวนปัญหาใหม่ — อาจมี basin/parameter อื่นที่ยังไม่ระบุ" },
+          { "if": "still far after n cycles", "loop_back_to": "step_1", "action": "ปรับ target metric (0.90) หรือขยาย horizon ให้สมจริงตาม baseline ที่วัดได้จริง" }
+        ]
+      }
+    }
+  },
+  "assumptions": [
+    "current (baseline score) ตั้งเป็น null เพราะยังไม่เคยวัด resonance score ของโค้ด greedy ปัจจุบันเป็นตัวเลข — ต้องรัน baseline (num_restarts=1, sa_T0=0) ก่อนเพื่อได้ค่าเริ่มต้นจริง",
+    "target 0.90 เป็นค่าสมมติฐานเบื้องต้น รอปรับหลังเห็น baseline จริงในรอบแรกของ control loop",
+    "expected_effect (Δ) ของ S_B/S_A/S_C เป็นค่าประมาณจากลักษณะของ intervention (ไม่ใช่ผลวัดจริง) ใช้จัดลำดับ priority เบื้องต้นเท่านั้น",
+    "cost (c) หน่วยเป็นชั่วโมงทำงานโดยประมาณของ 1 dev",
+    "แผนนี้ครอบคลุมเฉพาะการออกแบบ — ยังไม่ implement โค้ด optimizer จริงในรอบนี้ตามที่ตกลงกับผู้ใช้"
+  ]
+}
