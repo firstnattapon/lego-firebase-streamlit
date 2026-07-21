@@ -13,8 +13,8 @@ import pandas as pd
 import streamlit as st
 from firebase_admin import credentials, db
 
-from lego_dash_core import (MONEY_COLS, integrity_report, order_columns,
-                            rows_to_df)
+from lego_dash_core import (MONEY_COLS, default_chain_index, filter_audit_rows,
+                            integrity_report, order_columns, rows_to_df)
 
 ROWS_PATH = "webull_lego_rows"
 STATE_PATH = "webull_lego_state"
@@ -62,7 +62,9 @@ def main():
     chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df else []
     selected = chains[0] if chains else None
     if len(chains) > 1:
-        selected = st.selectbox("Chain", chains, index=len(chains) - 1)
+        # default = chain ที่ active ล่าสุดตาม state.updated_at (ไม่ใช่เรียงอักษร)
+        selected = st.selectbox("Chain", chains,
+                                index=default_chain_index(chains, state))
         df = df[df["chain_key"] == selected]
     elif chains:
         st.caption(f"Chain: {chains[0]}")
@@ -99,10 +101,14 @@ def main():
         else:
             st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
 
+    # audit เฉพาะ chain ที่เลือก — ผูกด้วย run_id กัน order ข้าม chain ปนตาราง
     audit = db.reference(AUDIT_PATH).get() or {}
     if audit:
-        st.subheader("Order audit (redacted)")
-        st.dataframe(pd.DataFrame(list(audit.values())), width="stretch")
+        run_ids = df["run_id"] if "run_id" in df.columns else []
+        adf = filter_audit_rows(audit, run_ids)
+        if not adf.empty:
+            st.subheader("Order audit (redacted)")
+            st.dataframe(adf, width="stretch")
 
 
 if __name__ == "__main__":

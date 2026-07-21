@@ -73,6 +73,29 @@ def order_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[cols]
 
 
+def default_chain_index(chains: list, state: dict | None) -> int:
+    """chain ที่ active ล่าสุดตาม state[ck].updated_at (ISO string เทียบอักษร = ลำดับเวลา)
+    ไม่มีข้อมูล state/updated_at -> ตัวสุดท้ายของ list (พฤติกรรมเดิม)"""
+    if not chains:
+        return 0
+    if not isinstance(state, dict) or not state:
+        return len(chains) - 1
+    stamps = {ck: str((state.get(ck) or {}).get("updated_at", "")) for ck in chains}
+    latest = max(chains, key=lambda ck: stamps[ck])
+    return chains.index(latest) if stamps[latest] else len(chains) - 1
+
+
+def filter_audit_rows(audit: dict | None, run_ids) -> pd.DataFrame:
+    """audit เฉพาะ order ของ chain ที่เลือก — ผูกด้วย run_id (audit 1 รายการ/แถว)
+    payload เก่าที่ไม่มี run_id เลย -> คืนทั้งหมด (ไม่ตัดข้อมูลที่กรองไม่ได้)"""
+    if not audit:
+        return pd.DataFrame()
+    adf = pd.DataFrame([v for v in audit.values() if isinstance(v, dict)])
+    if adf.empty or "run_id" not in adf.columns:
+        return adf
+    return adf[adf["run_id"].isin(set(run_ids))].reset_index(drop=True)
+
+
 def _max_abs(s: pd.Series) -> float:
     s = s.dropna()
     return 0.0 if s.empty else float(s.abs().max())

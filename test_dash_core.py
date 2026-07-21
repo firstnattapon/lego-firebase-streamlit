@@ -10,8 +10,9 @@ from __future__ import annotations
 import math
 import sys
 
-from lego_dash_core import (COLUMN_ORDER, integrity_report, order_columns,
-                            rows_to_df)
+from lego_dash_core import (COLUMN_ORDER, default_chain_index,
+                            filter_audit_rows, integrity_report,
+                            order_columns, rows_to_df)
 
 FIX_C = 1500.0
 DIFF = 60.0
@@ -127,6 +128,37 @@ def test_integrity_catches_corruption():
     corrupt("DNA signal", 5)                    # E7
     corrupt("สถานะ", "READY_BUY", row_idx=2)    # E8 (แถว signal=0)
     corrupt("จำนวนสั่ง (หุ้น)", 3.0, row_idx=2)  # E8 (PASS ต้อง qty=0)
+
+
+def test_default_chain_index_latest_by_updated_at():
+    chains = ["AAPL_aaa", "APLS_zzz", "TSLA_mmm"]
+    state = {
+        "AAPL_aaa": {"updated_at": "2026-07-20T15:00:00Z"},
+        "APLS_zzz": {"updated_at": "2026-07-01T10:00:00Z"},
+        "TSLA_mmm": {"updated_at": "2026-07-19T09:00:00Z"},
+    }
+    assert default_chain_index(chains, state) == 0            # AAPL ล่าสุด ไม่ใช่เรียงอักษร
+    assert default_chain_index(chains, None) == len(chains) - 1   # ไม่มี state -> เดิม
+    assert default_chain_index(chains, {}) == len(chains) - 1
+    assert default_chain_index([], state) == 0
+    # state ไม่มี updated_at เลย -> fallback ตัวสุดท้าย
+    assert default_chain_index(chains, {"AAPL_aaa": {}}) == len(chains) - 1
+
+
+def test_filter_audit_rows_by_chain_run_ids():
+    audit = {
+        "o1": {"run_id": "r1", "side": "BUY", "status": "FILLED"},
+        "o2": {"run_id": "r2", "side": "SELL", "status": "PLACING"},
+        "o3": {"run_id": "r9", "side": "BUY", "status": "FILLED"},
+        "junk": "not-a-dict",
+    }
+    adf = filter_audit_rows(audit, ["r1", "r2"])
+    assert set(adf["run_id"]) == {"r1", "r2"}
+    assert filter_audit_rows(None, ["r1"]).empty
+    assert filter_audit_rows({}, ["r1"]).empty
+    # payload เก่าไม่มี run_id -> คืนทั้งหมด (ไม่ตัดข้อมูลที่กรองไม่ได้)
+    legacy = {"o1": {"side": "BUY"}, "o2": {"side": "SELL"}}
+    assert len(filter_audit_rows(legacy, ["r1"])) == 2
 
 
 if __name__ == "__main__":
