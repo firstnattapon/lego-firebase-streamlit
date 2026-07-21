@@ -2,6 +2,7 @@
 
 deploy บน streamlit.app: ใส่ service account JSON + DB URL ใน st.secrets
 กรอง committed==True เท่านั้น (orphan/pending ไม่แสดง) + เลือก chain ก่อน plot
+ตารางบังคับลำดับสัญญา 17 คอลัมน์ + integrity check สมการ LEGO (E1–E8)
 """
 from __future__ import annotations
 
@@ -12,33 +13,34 @@ import pandas as pd
 import streamlit as st
 from firebase_admin import credentials, db
 
+from lego_dash_core import (MONEY_COLS, default_chain_index, filter_audit_rows,
+                            integrity_report, order_columns, rows_to_df)
+
 ROWS_PATH = "webull_lego_rows"
 STATE_PATH = "webull_lego_state"
 AUDIT_PATH = "webull_lego_order_audit"
 
-MONEY_COLS = ["ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)",
-              "Rₙ อ้างอิง (USD)", "ΔAₙ ต่อสเต็ป (USD)", "Aₙ สะสม (USD)",
-              "Eₙ ส่วนเกินสะสม (USD)"]
+
+def _has_secret(key: str) -> bool:
+    try:                      # ไม่มีไฟล์ secrets เลย -> st.secrets จะ raise ไม่ใช่คืน False
+        return key in st.secrets
+    except Exception:
+        return False
 
 
 @st.cache_resource
 def _init():
     if not firebase_admin._apps:
+        if not (_has_secret("FIREBASE_SA_JSON") and _has_secret("FIREBASE_DB_URL")):
+            st.error("ตั้ง st.secrets: FIREBASE_SA_JSON และ FIREBASE_DB_URL ก่อน deploy")
+            st.stop()
         cred = credentials.Certificate(json.loads(st.secrets["FIREBASE_SA_JSON"]))
         firebase_admin.initialize_app(cred, {"databaseURL": st.secrets["FIREBASE_DB_URL"]})
     return True
 
 
 def load_rows() -> pd.DataFrame:
-    data = db.reference(ROWS_PATH).get() or {}
-    df = pd.DataFrame(list(data.values()))
-    if df.empty:
-        return df
-    if "committed" in df:
-        df = df[df["committed"] == True]          # noqa: E712 — กรอง orphan/pending
-    if "version" in df:
-        df = df.sort_values("version")
-    return df
+    return rows_to_df(db.reference(ROWS_PATH).get())
 
 
 def main():
@@ -49,7 +51,7 @@ def main():
     state = db.reference(STATE_PATH).get() or {}
     if state:
         st.subheader("State pointer (anchor ปัจจุบัน)")
-        st.dataframe(pd.DataFrame(state).T, use_container_width=True)
+        st.dataframe(pd.DataFrame(state).T, width="stretch")
 
     df = load_rows()
     if df.empty:
@@ -58,8 +60,11 @@ def main():
 
     # เลือก chain ก่อน — กัน step ซ้ำข้าม chain ปนกราฟ
     chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df else []
+    selected = chains[0] if chains else None
     if len(chains) > 1:
-        selected = st.selectbox("Chain", chains, index=len(chains) - 1)
+        # default = chain ที่ active ล่าสุดตาม state.updated_at (ไม่ใช่เรียงอักษร)
+        selected = st.selectbox("Chain", chains,
+                                index=default_chain_index(chains, state))
         df = df[df["chain_key"] == selected]
     elif chains:
         st.caption(f"Chain: {chains[0]}")
@@ -77,16 +82,33 @@ def main():
     st.line_chart(chart_df)
 
     st.subheader("ตาราง 17 คอลัมน์ (round 2dp)")
-    show = df.copy()
+    show = order_columns(df.copy())
     for col in MONEY_COLS:
         if col in show:
             show[col] = show[col].astype(float).round(2)
-    st.dataframe(show, use_container_width=True)
+    st.dataframe(show, width="stretch")
 
+    # integrity: ตรวจจากค่า full precision (ก่อน round) ของ chain ที่เลือก
+    with st.expander("🔎 Integrity check — สมการ LEGO (E1–E8)", expanded=False):
+        p0_hint = None
+        if selected and isinstance(state, dict):
+            raw = (state.get(selected) or {}).get("p0")
+            p0_hint = float(raw) if raw is not None else None
+        report, ok = integrity_report(df, p0_hint=p0_hint)
+        st.dataframe(report, width="stretch")
+        if ok:
+            st.success("ทุกสมการผ่าน — แถวบน RTDB สอดคล้อง LEGO invariant")
+        else:
+            st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
+
+    # audit เฉพาะ chain ที่เลือก — ผูกด้วย run_id กัน order ข้าม chain ปนตาราง
     audit = db.reference(AUDIT_PATH).get() or {}
     if audit:
-        st.subheader("Order audit (redacted)")
-        st.dataframe(pd.DataFrame(list(audit.values())), use_container_width=True)
+        run_ids = df["run_id"] if "run_id" in df.columns else []
+        adf = filter_audit_rows(audit, run_ids)
+        if not adf.empty:
+            st.subheader("Order audit (redacted)")
+            st.dataframe(adf, width="stretch")
 
 
 if __name__ == "__main__":
