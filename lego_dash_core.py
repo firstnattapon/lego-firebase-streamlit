@@ -32,7 +32,11 @@ COLUMN_ORDER = [
     "Aₙ สะสม (USD)",          # 16
     "Eₙ ส่วนเกินสะสม (USD)",  # 17
 ]
-META_COLS = ["run_id", "chain_key", "version", "committed"]
+META_COLS = ["run_id", "chain_key", "version", "committed", "semantics"]
+
+# mirror ของ lego_state.CASHFLOW_SEMANTICS — แถวที่ ΔAₙ/Aₙ = กำไร realized เฉพาะ
+# รอบ Buy↔Sell ที่จับคู่ปิดแล้ว (บทที่ 4) ไม่ใช่สูตรราคา FIX_C×(Pₙ/Pₙ₋₁−1)
+REALIZED_SEMANTICS = "cycle_realized_v1"
 
 # คอลัมน์เงิน 7 ตัว (6, 12–17) — round 2dp เฉพาะตอนแสดง (ตรง columns_presented ฝั่ง engine)
 MONEY_COLS = ["ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)",
@@ -111,8 +115,11 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
       E1  FIX_C คงที่:   Vₙ + gapₙ = FIX_C ทุกแถว   (นิยาม gap = FIX_C − Vₙ)
       E2  มูลค่าพอร์ต:    Vₙ = holdingsₙ × Pₙ
       E3  อ้างอิง:        Rₙ = FIX_C × ln(Pₙ / P₀)
-      E4  ต่อสเต็ป:       ΔAₙ = FIX_C × (Pₙ / Pₙ₋₁ − 1)
-      E5  สะสม:          Aₙ = Aₙ₋₁ + ΔAₙ
+      E4  ต่อสเต็ป:       ΔAₙ = FIX_C × (Pₙ / Pₙ₋₁ − 1) — เฉพาะแถว legacy;
+                         แถว semantics=cycle_realized_v1: ΔAₙ = กำไร realized จาก
+                         รอบที่จับคู่ปิด (ตรวจจากราคาไม่ได้ -> ข้ามพร้อมหมายเหตุ)
+      E5  สะสม:          Aₙ = Aₙ₋₁ + ΔAₙ — ข้ามเฉพาะรอยต่อ legacy→realized
+                         (baseline Aₙ รีเซ็ตเป็น 0 ตอนเปลี่ยน semantics)
       E6  ส่วนเกิน:       Eₙ = Aₙ − Rₙ
       E7  โครงสร้าง:      step +1 ทุกแถว, version +1 ทุกแถว, signal ∈ {0,1}
       E8  decision:      signal=0 -> PASS_DNA_ZERO ; READY_BUY -> gap>0, qty>0 ;
@@ -157,11 +164,27 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     else:
         add("E3", "Rₙ = FIX_C × ln(Pₙ/P₀)", None, True, "ข้าม — ไม่รู้ P₀ (ไม่มีแถว genesis/state)")
 
+    # แถว realized (cycle_realized_v1): ΔAₙ = กำไรจากรอบที่จับคู่ปิด — สูตรราคาใช้ตรวจไม่ได้
+    if "semantics" in df.columns:
+        realized = df["semantics"].astype(str) == REALIZED_SEMANTICS
+    else:
+        realized = pd.Series(False, index=df.index)
+
     if len(df) > 1:
-        r4 = _max_abs((dA - fix_c * (p / p.shift(1) - 1.0)).iloc[1:])
-        add("E4", "ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)", r4, r4 <= scale)
-        r5 = _max_abs((A - (A.shift(1) + dA)).iloc[1:])
-        add("E5", "Aₙ = Aₙ₋₁ + ΔAₙ", r5, r5 <= scale)
+        resid4 = dA - fix_c * (p / p.shift(1) - 1.0)
+        r4 = _max_abs(resid4[~realized])
+        n_realized = int(realized.iloc[1:].sum())
+        note4 = ("" if n_realized == 0 else
+                 f"ข้าม {n_realized} แถว realized (ΔAₙ = กำไรรอบที่จับคู่ปิด ไม่ใช่สูตรราคา)")
+        add("E4", "ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)", r4, r4 <= scale, note4)
+
+        # รอยต่อ legacy→realized: baseline Aₙ รีเซ็ตเป็น 0 (ห้ามลากค่าทฤษฎีมาต่อ)
+        boundary = realized & ~realized.shift(1, fill_value=True)
+        resid5 = A - (A.shift(1) + dA)
+        r5 = _max_abs(resid5[~boundary])
+        note5 = ("" if int(boundary.sum()) == 0 else
+                 "ข้ามรอยต่อ legacy→realized (baseline Aₙ รีเซ็ตเป็น 0)")
+        add("E5", "Aₙ = Aₙ₋₁ + ΔAₙ", r5, r5 <= scale, note5)
     else:
         add("E4", "ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)", None, True, "แถวเดียว — ไม่มีคู่เทียบ")
         add("E5", "Aₙ = Aₙ₋₁ + ΔAₙ", None, True, "แถวเดียว — ไม่มีคู่เทียบ")

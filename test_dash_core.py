@@ -161,6 +161,80 @@ def test_filter_audit_rows_by_chain_run_ids():
     assert len(filter_audit_rows(legacy, ["r1"])) == 2
 
 
+
+
+# ---- semantics=cycle_realized_v1: ΔAₙ/Aₙ = กำไรรอบที่จับคู่ปิด (บทที่ 4) ----
+def _mk_realized_chain(prices: list[float], realized_deltas: list[float],
+                       start_version: int = 1, start_step: int = 0,
+                       A_start: float = 0.0, p0: float | None = None) -> dict:
+    """แถว semantics ใหม่: R จากสูตรราคา (Reference), ΔA = กำไร realized ที่ให้มา"""
+    rows = {}
+    p0 = prices[0] if p0 is None else p0
+    A_prev = A_start
+    for n, (p, d) in enumerate(zip(prices, realized_deltas)):
+        genesis = (start_version == 1 and n == 0)
+        R = 0.0 if genesis else FIX_C * math.log(p / p0)
+        dA = 0.0 if genesis else d
+        A = A_prev + dA
+        E = A - R if not genesis else 0.0
+        A_prev = A
+        v = 150.0 * p
+        row = {
+            "เวลา (UTC)": f"2026-07-21T14:{n:02d}:00Z",
+            "สินทรัพย์": "APLS", "สถานะ": "PASS_THRESHOLD",
+            "DNA step": start_step + n, "DNA signal": 1,
+            "ราคา Pₙ (USD)": p, "จำนวนถือครอง (หุ้น)": 150.0,
+            "คำสั่ง": "PASS", "ฝั่ง": "", "เหตุผล": "PASS_THRESHOLD",
+            "จำนวนสั่ง (หุ้น)": 0.0,
+            "มูลค่าพอร์ต (USD)": v, "ส่วนต่างเป้าหมาย (USD)": FIX_C - v,
+            "Rₙ อ้างอิง (USD)": R, "ΔAₙ ต่อสเต็ป (USD)": dA,
+            "Aₙ สะสม (USD)": A, "Eₙ ส่วนเกินสะสม (USD)": A - R if not genesis else 0.0,
+            "run_id": "rlz" + f"{start_version + n:029d}",
+            "chain_key": "APLS_abc123def456",
+            "version": start_version + n, "committed": True,
+            "semantics": "cycle_realized_v1",
+        }
+        rows[row["run_id"]] = row
+    return rows
+
+
+def test_integrity_realized_rows_skip_price_formula_for_dA():
+    # ราคาขยับแรงแต่ ΔA = 0 (ไม่มีรอบปิด) แล้วค่อย +13.64 เมื่อรอบปิด — ต้องผ่าน
+    # ถ้ายังใช้สูตรราคา (E4 เดิม) จะ fail ทันที
+    data = _mk_realized_chain([10.0, 11.0, 9.0, 10.0], [0.0, 0.0, 0.0, 13.64])
+    report, ok = integrity_report(rows_to_df(data), p0_hint=10.0)
+    assert ok, f"แถว realized ต้องไม่ถูกตัดสินด้วยสูตรราคา:\n{report}"
+    e4 = report[report["ข้อ"] == "E4"].iloc[0]
+    assert "realized" in str(e4["หมายเหตุ"])
+
+
+def test_integrity_mixed_legacy_then_realized_boundary_ok():
+    legacy = _mk_chain(PRICES, HOLD, SIGNALS)          # A ทฤษฎีสะสมถึง version 5
+    realized = _mk_realized_chain([10.5, 10.8, 10.2], [0.0, 2.5, 0.0],
+                                  start_version=6, start_step=5,
+                                  A_start=0.0, p0=10.0)   # baseline รีเซ็ต 0
+    report, ok = integrity_report(rows_to_df({**legacy, **realized}), p0_hint=10.0)
+    assert ok, f"รอยต่อ legacy→realized ต้องไม่ false-alarm:\n{report}"
+    e5 = report[report["ข้อ"] == "E5"].iloc[0]
+    assert "รอยต่อ" in str(e5["หมายเหตุ"])
+
+
+def test_integrity_still_catches_broken_A_chain_in_realized_rows():
+    data = _mk_realized_chain([10.0, 11.0, 9.0, 10.0], [0.0, 0.0, 0.0, 13.64])
+    key = sorted(data, key=lambda k: data[k]["version"])[2]
+    data[key]["Aₙ สะสม (USD)"] = 777.0                  # ทำลาย chain ภายใน realized
+    report, ok = integrity_report(rows_to_df(data), p0_hint=10.0)
+    assert not ok, f"E5 ภายในโซน realized ต้องยังจับได้:\n{report}"
+
+
+def test_order_columns_groups_semantics_with_meta():
+    data = _mk_realized_chain([10.0, 11.0], [0.0, 0.0])
+    df = order_columns(rows_to_df(data))
+    assert list(df.columns)[:17] == COLUMN_ORDER
+    assert list(df.columns)[17:22] == ["run_id", "chain_key", "version",
+                                       "committed", "semantics"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
