@@ -19,20 +19,32 @@ DIFF = 60.0
 
 
 def _mk_chain(prices: list[float], holdings: list[float], signals: list[int]) -> dict:
-    """สร้างแถว committed ตามสูตร LEGO เป๊ะ (spec 17 คอลัมน์) คืน dict แบบ RTDB"""
+    """สร้างแถว committed ตามสูตร LEGO gated_theoretical_v2 เป๊ะ คืน dict แบบ RTDB
+
+    act (signal=1):  ΔA = FIX_C×(Pₙ/P_acted − 1) แล้วเลื่อน P_acted = Pₙ ; E = A − R
+    pass (signal=0): ΔA = 0, A ค้าง, P_acted แช่แข็ง ; E = A − FIX_C×ln(P_acted/P₀)
+    """
     rows = {}
     p0 = prices[0]
     A_prev = 0.0
+    acted = p0
     for n, (p, h, sig) in enumerate(zip(prices, holdings, signals)):
         v = h * p
         gap = FIX_C - v
         if n == 0:
             R = dA = A = E = 0.0
+            acted = p
         else:
             R = FIX_C * math.log(p / p0)
-            dA = FIX_C * (p / prices[n - 1] - 1.0)
-            A = A_prev + dA
-            E = A - R
+            if sig == 1:
+                dA = FIX_C * (p / acted - 1.0)
+                A = A_prev + dA
+                E = A - R
+                acted = p
+            else:
+                dA = 0.0
+                A = A_prev
+                E = A - FIX_C * math.log(acted / p0)
         A_prev = A
 
         if sig == 0:
@@ -66,6 +78,7 @@ def _mk_chain(prices: list[float], holdings: list[float], signals: list[int]) ->
             "chain_key": "APLS_abc123def456",
             "version": n + 1,
             "committed": True,
+            "semantics": "gated_theoretical_v2",
         }
         rows[row["run_id"]] = row
     return rows
@@ -128,6 +141,9 @@ def test_integrity_catches_corruption():
     corrupt("DNA signal", 5)                    # E7
     corrupt("สถานะ", "READY_BUY", row_idx=2)    # E8 (แถว signal=0)
     corrupt("จำนวนสั่ง (หุ้น)", 3.0, row_idx=2)  # E8 (PASS ต้อง qty=0)
+    # แถว pass (row_idx=2, signal=0): ΔA ต้อง 0 และ E ต้อง smooth — จับได้ทั้งคู่
+    corrupt("ΔAₙ ต่อสเต็ป (USD)", 5.0, row_idx=2)          # E4 pass ≠ 0
+    corrupt("Eₙ ส่วนเกินสะสม (USD)", 123.0, row_idx=2)     # E6 smooth
 
 
 def test_default_chain_index_latest_by_updated_at():
@@ -198,23 +214,61 @@ def _mk_realized_chain(prices: list[float], realized_deltas: list[float],
     return rows
 
 
-def test_integrity_realized_rows_skip_price_formula_for_dA():
-    # ราคาขยับแรงแต่ ΔA = 0 (ไม่มีรอบปิด) แล้วค่อย +13.64 เมื่อรอบปิด — ต้องผ่าน
-    # ถ้ายังใช้สูตรราคา (E4 เดิม) จะ fail ทันที
+def test_integrity_legacy_realized_rows_skipped_not_judged_by_gated_formula():
+    # แถว semantics เก่า (cycle_realized_v1): ΔA ไม่ตรงสูตร gated — ต้องข้าม ไม่ false-alarm
     data = _mk_realized_chain([10.0, 11.0, 9.0, 10.0], [0.0, 0.0, 0.0, 13.64])
     report, ok = integrity_report(rows_to_df(data), p0_hint=10.0)
-    assert ok, f"แถว realized ต้องไม่ถูกตัดสินด้วยสูตรราคา:\n{report}"
+    assert ok, f"แถว semantics เก่าต้องถูกข้าม ไม่ถูกตัดสินด้วยสูตร gated:\n{report}"
     e4 = report[report["ข้อ"] == "E4"].iloc[0]
-    assert "realized" in str(e4["หมายเหตุ"])
+    assert "semantics เก่า" in str(e4["หมายเหตุ"])
 
 
-def test_integrity_mixed_legacy_then_realized_boundary_ok():
-    legacy = _mk_chain(PRICES, HOLD, SIGNALS)          # A ทฤษฎีสะสมถึง version 5
-    realized = _mk_realized_chain([10.5, 10.8, 10.2], [0.0, 2.5, 0.0],
-                                  start_version=6, start_step=5,
-                                  A_start=0.0, p0=10.0)   # baseline รีเซ็ต 0
-    report, ok = integrity_report(rows_to_df({**legacy, **realized}), p0_hint=10.0)
-    assert ok, f"รอยต่อ legacy→realized ต้องไม่ false-alarm:\n{report}"
+def _mk_gated_cont(prices, signals, start_version, start_step,
+                   acted0, A_start, p0):
+    """แถว gated_theoretical_v2 ต่อท้าย chain เดิม (ไม่ใช่ genesis)"""
+    rows = {}
+    A_prev, acted = A_start, acted0
+    for n, (p, sig) in enumerate(zip(prices, signals)):
+        R = FIX_C * math.log(p / p0)
+        if sig == 1:
+            dA = FIX_C * (p / acted - 1.0)
+            A = A_prev + dA
+            E = A - R
+            acted = p
+        else:
+            dA, A = 0.0, A_prev
+            E = A - FIX_C * math.log(acted / p0)
+        A_prev = A
+        v = 150.0 * p
+        row = {
+            "เวลา (UTC)": f"2026-07-22T14:{n:02d}:00Z",
+            "สินทรัพย์": "APLS",
+            "สถานะ": "PASS_DNA_ZERO" if sig == 0 else "PASS_THRESHOLD",
+            "DNA step": start_step + n, "DNA signal": sig,
+            "ราคา Pₙ (USD)": p, "จำนวนถือครอง (หุ้น)": 150.0,
+            "คำสั่ง": "PASS", "ฝั่ง": "",
+            "เหตุผล": "PASS_DNA_ZERO" if sig == 0 else "PASS_THRESHOLD",
+            "จำนวนสั่ง (หุ้น)": 0.0,
+            "มูลค่าพอร์ต (USD)": v, "ส่วนต่างเป้าหมาย (USD)": FIX_C - v,
+            "Rₙ อ้างอิง (USD)": R, "ΔAₙ ต่อสเต็ป (USD)": dA,
+            "Aₙ สะสม (USD)": A, "Eₙ ส่วนเกินสะสม (USD)": E,
+            "run_id": "gat" + f"{start_version + n:029d}",
+            "chain_key": "APLS_abc123def456",
+            "version": start_version + n, "committed": True,
+            "semantics": "gated_theoretical_v2",
+        }
+        rows[row["run_id"]] = row
+    return rows
+
+
+def test_integrity_mixed_legacy_then_gated_boundary_ok():
+    # legacy (cycle_realized) v1–4 แล้ว migrate เป็น gated v5+ (baseline A รีเซ็ต 0,
+    # P_acted ตั้งต้น = ราคาแถวเก่าล่าสุด — ตรง read_anchor migration ฝั่ง engine)
+    legacy = _mk_realized_chain([10.0, 11.0, 9.0, 10.0], [0.0, 0.0, 0.0, 13.64])
+    gated = _mk_gated_cont([10.2, 10.8], [1, 0], start_version=5, start_step=4,
+                           acted0=10.0, A_start=0.0, p0=10.0)
+    report, ok = integrity_report(rows_to_df({**legacy, **gated}), p0_hint=10.0)
+    assert ok, f"รอยต่อ legacy→gated ต้องไม่ false-alarm:\n{report}"
     e5 = report[report["ข้อ"] == "E5"].iloc[0]
     assert "รอยต่อ" in str(e5["หมายเหตุ"])
 

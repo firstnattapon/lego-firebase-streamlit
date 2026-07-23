@@ -34,9 +34,12 @@ COLUMN_ORDER = [
 ]
 META_COLS = ["run_id", "chain_key", "version", "committed", "semantics"]
 
-# mirror ของ lego_state.CASHFLOW_SEMANTICS — แถวที่ ΔAₙ/Aₙ = กำไร realized เฉพาะ
-# รอบ Buy↔Sell ที่จับคู่ปิดแล้ว (บทที่ 4) ไม่ใช่สูตรราคา FIX_C×(Pₙ/Pₙ₋₁−1)
-REALIZED_SEMANTICS = "cycle_realized_v1"
+# mirror ของ lego_state.CASHFLOW_SEMANTICS — ledger ทฤษฎีแบบ gated (ตาม gated demo):
+#   act (signal=1):  ΔAₙ = FIX_C×(Pₙ/P_acted − 1) โดย P_acted = ราคาแถว act ล่าสุด
+#   pass (signal=0): ΔAₙ = 0, Aₙ ค้าง, P_acted แช่แข็ง, Eₙ smooth (ค้างค่า act ล่าสุด)
+GATED_SEMANTICS = "gated_theoretical_v2"
+# semantics เก่า (ก่อน v2): ΔAₙ = กำไร realized จากรอบ Buy↔Sell ที่จับคู่ปิด
+LEGACY_REALIZED_SEMANTICS = "cycle_realized_v1"
 
 # คอลัมน์เงิน 7 ตัว (6, 12–17) — round 2dp เฉพาะตอนแสดง (ตรง columns_presented ฝั่ง engine)
 MONEY_COLS = ["ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)",
@@ -115,12 +118,14 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
       E1  FIX_C คงที่:   Vₙ + gapₙ = FIX_C ทุกแถว   (นิยาม gap = FIX_C − Vₙ)
       E2  มูลค่าพอร์ต:    Vₙ = holdingsₙ × Pₙ
       E3  อ้างอิง:        Rₙ = FIX_C × ln(Pₙ / P₀)
-      E4  ต่อสเต็ป:       ΔAₙ = FIX_C × (Pₙ / Pₙ₋₁ − 1) — เฉพาะแถว legacy;
-                         แถว semantics=cycle_realized_v1: ΔAₙ = กำไร realized จาก
-                         รอบที่จับคู่ปิด (ตรวจจากราคาไม่ได้ -> ข้ามพร้อมหมายเหตุ)
-      E5  สะสม:          Aₙ = Aₙ₋₁ + ΔAₙ — ข้ามเฉพาะรอยต่อ legacy→realized
-                         (baseline Aₙ รีเซ็ตเป็น 0 ตอนเปลี่ยน semantics)
-      E6  ส่วนเกิน:       Eₙ = Aₙ − Rₙ
+      E4  ต่อสเต็ป (gated): act (signal=1) -> ΔAₙ = FIX_C × (Pₙ / P_acted − 1)
+                         โดย P_acted = ราคาแถว act ล่าสุด (reconstruct จาก signal series)
+                         pass (signal=0) -> ΔAₙ = 0
+                         แถว semantics เก่า (legacy/cycle_realized_v1) -> ข้ามพร้อมหมายเหตุ
+      E5  สะสม:          Aₙ = Aₙ₋₁ + ΔAₙ — ข้ามเฉพาะรอยต่อเปลี่ยน semantics
+                         (baseline Aₙ รีเซ็ตเป็น 0)
+      E6  ส่วนเกิน (smooth): act -> Eₙ = Aₙ − Rₙ ;
+                         pass -> Eₙ = Aₙ − FIX_C × ln(P_acted / P₀)
       E7  โครงสร้าง:      step +1 ทุกแถว, version +1 ทุกแถว, signal ∈ {0,1}
       E8  decision:      signal=0 -> PASS_DNA_ZERO ; READY_BUY -> gap>0, qty>0 ;
                          READY_SELL -> gap<0, qty>0 ; PASS_* -> qty=0
@@ -164,38 +169,76 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     else:
         add("E3", "Rₙ = FIX_C × ln(Pₙ/P₀)", None, True, "ข้าม — ไม่รู้ P₀ (ไม่มีแถว genesis/state)")
 
-    # แถว realized (cycle_realized_v1): ΔAₙ = กำไรจากรอบที่จับคู่ปิด — สูตรราคาใช้ตรวจไม่ได้
+    # แถว semantics เก่า (legacy price-formula / cycle_realized_v1): ตรวจสมการ gated ไม่ได้
     if "semantics" in df.columns:
-        realized = df["semantics"].astype(str) == REALIZED_SEMANTICS
+        gated = (df["semantics"].astype(str) == GATED_SEMANTICS).tolist()
     else:
-        realized = pd.Series(False, index=df.index)
+        gated = [False] * len(df)
 
-    if len(df) > 1:
-        resid4 = dA - fix_c * (p / p.shift(1) - 1.0)
-        r4 = _max_abs(resid4[~realized])
-        n_realized = int(realized.iloc[1:].sum())
-        note4 = ("" if n_realized == 0 else
-                 f"ข้าม {n_realized} แถว realized (ΔAₙ = กำไรรอบที่จับคู่ปิด ไม่ใช่สูตรราคา)")
-        add("E4", "ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)", r4, r4 <= scale, note4)
+    # reconstruct P_acted (ราคาแถว act ล่าสุด) จาก signal series:
+    # act (signal=1) -> เลื่อนเป็น Pₙ ; pass (signal=0) -> แช่แข็ง
+    # prev_acted[i] = P_acted "ก่อน" แถว i (None = ยังไม่รู้ เช่นตัดหน้า chain มา)
+    n = len(df)
+    prev_acted: list[float | None] = [None] * n
+    acted: float | None = None
+    for i in range(n):
+        prev_acted[i] = acted
+        if i == 0 and genesis:
+            acted = float(p.iloc[0])            # genesis: P_acted เริ่ม = P₀
+        elif not gated[i]:
+            acted = float(p.iloc[i])            # semantics เก่า: pointer เลื่อนทุกแถว
+        elif int(sig.iloc[i]) == 1:
+            acted = float(p.iloc[i])
 
-        # รอยต่อ legacy→realized: baseline Aₙ รีเซ็ตเป็น 0 (ห้ามลากค่าทฤษฎีมาต่อ)
-        boundary = realized & ~realized.shift(1, fill_value=True)
+    resid4, skip4 = [], 0
+    resid6, skip6 = [], 0
+    for i in range(n):
+        if i == 0 and genesis:
+            continue                             # แถว genesis เช็คใน E6 (ทุกค่า = 0)
+        if not gated[i]:
+            skip4 += 1
+            skip6 += 1
+            continue
+        pa = prev_acted[i]
+        if int(sig.iloc[i]) == 1:
+            if pa is None:
+                skip4 += 1                       # ไม่รู้ P_acted ก่อนหน้า (ตัดหน้า chain)
+            else:
+                resid4.append(abs(float(dA.iloc[i]) - fix_c * (float(p.iloc[i]) / pa - 1.0)))
+            resid6.append(abs(float(E.iloc[i]) - (float(A.iloc[i]) - float(R.iloc[i]))))
+        else:
+            resid4.append(abs(float(dA.iloc[i])))          # pass -> ΔAₙ = 0
+            if pa is None or p0 is None or p0 <= 0:
+                skip6 += 1                       # smooth E ต้องรู้ P_acted และ P₀
+            else:
+                resid6.append(abs(float(E.iloc[i])
+                                  - (float(A.iloc[i]) - fix_c * math.log(pa / p0))))
+
+    r4 = max(resid4) if resid4 else None
+    note4 = "" if skip4 == 0 else f"ข้าม {skip4} แถว (semantics เก่า/ไม่รู้ P_acted)"
+    add("E4", "gated: act ΔAₙ = FIX_C × (Pₙ/P_acted − 1) ; pass ΔAₙ = 0",
+        r4, (r4 is None) or r4 <= scale, note4 or ("ไม่มีแถวตรวจได้" if r4 is None else ""))
+
+    if n > 1:
+        gs = pd.Series(gated, index=df.index)
+        boundary = gs.ne(gs.shift(1))                   # รอยต่อเปลี่ยน semantics (สองทิศ)
+        boundary.iloc[0] = False
         resid5 = A - (A.shift(1) + dA)
         r5 = _max_abs(resid5[~boundary])
         note5 = ("" if int(boundary.sum()) == 0 else
-                 "ข้ามรอยต่อ legacy→realized (baseline Aₙ รีเซ็ตเป็น 0)")
+                 "ข้ามรอยต่อเปลี่ยน semantics (baseline Aₙ รีเซ็ตเป็น 0)")
         add("E5", "Aₙ = Aₙ₋₁ + ΔAₙ", r5, r5 <= scale, note5)
     else:
-        add("E4", "ΔAₙ = FIX_C × (Pₙ/Pₙ₋₁ − 1)", None, True, "แถวเดียว — ไม่มีคู่เทียบ")
         add("E5", "Aₙ = Aₙ₋₁ + ΔAₙ", None, True, "แถวเดียว — ไม่มีคู่เทียบ")
 
-    r6 = _max_abs(E - (A - R))
+    r6 = max(resid6) if resid6 else 0.0
     if genesis:
         r6 = max(r6, abs(R.iloc[0]), abs(dA.iloc[0]), abs(A.iloc[0]), abs(E.iloc[0]))
         note6 = "รวมเช็คแถวแรก R₀=ΔA₀=A₀=E₀=0"
     else:
-        note6 = ""
-    add("E6", "Eₙ = Aₙ − Rₙ", r6, r6 <= scale, note6)
+        note6 = "" if skip6 == 0 else f"ข้าม {skip6} แถว (semantics เก่า/ไม่รู้ P_acted/P₀)"
+    add("E6", "smooth: act Eₙ = Aₙ − Rₙ ; pass Eₙ = Aₙ − FIX_C × ln(P_acted/P₀)",
+        r6, r6 <= scale, note6)
 
     ok_step = bool((step.diff().iloc[1:] == 1).all()) if len(df) > 1 else True
     ok_ver = True

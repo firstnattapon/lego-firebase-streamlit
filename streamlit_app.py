@@ -76,7 +76,12 @@ def main():
     c3.metric("Pₙ (USD)", f"{float(latest.get('ราคา Pₙ (USD)', 0)):.2f}")
     c4.metric("Eₙ สะสม (USD)", f"{float(latest.get('Eₙ ส่วนเกินสะสม (USD)', 0)):.2f}")
 
-    st.subheader("Recurrence: Rₙ (อ้างอิง) vs Aₙ (จริง) vs Eₙ (ส่วนเกิน)")
+    st.subheader("Recurrence: Rₙ (อ้างอิง) vs Aₙ (gated ledger) vs Eₙ (smooth)")
+    st.caption(
+        "gated_theoretical_v2: แถว act (signal=1) ΔAₙ = FIX_C×(Pₙ/P_acted−1) "
+        "เทียบราคาแถว act ล่าสุด · แถว pass (signal=0) Aₙ ค้าง, Eₙ ค้างค่า act ล่าสุด "
+        "(smooth) — Eₙ ไม่ลดและ ≥ 0 เสมอ"
+    )
     chart_df = df.set_index("DNA step")[[
         "Rₙ อ้างอิง (USD)", "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]].astype(float)
     st.line_chart(chart_df)
