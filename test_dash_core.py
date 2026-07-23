@@ -10,9 +10,10 @@ from __future__ import annotations
 import math
 import sys
 
-from lego_dash_core import (COLUMN_ORDER, default_chain_index,
-                            filter_audit_rows, integrity_report,
-                            order_columns, rows_to_df)
+from lego_dash_core import (COLUMN_ORDER, count_ledger_corrections,
+                            default_chain_index, filter_audit_rows,
+                            integrity_report, order_columns,
+                            recompute_gated_ledger, rows_to_df)
 
 FIX_C = 1500.0
 DIFF = 60.0
@@ -173,6 +174,71 @@ def test_pass_threshold_signal1_freezes_ledger():
     bad[key]["ΔAₙ ต่อสเต็ป (USD)"] = FIX_C * (11.0 / 12.0 - 1.0)   # ค่าแบบ act (ผิด)
     _, ok2 = integrity_report(rows_to_df(bad), p0_hint=10.0)
     assert not ok2, "PASS_THRESHOLD ที่ยัง act (ΔA≠0) ต้องถูกจับ (E4/E5)"
+
+
+def test_recompute_gated_ledger_freezes_engine_pass_rows():
+    # จำลอง engine bug: แถว PASS_THRESHOLD (signal=1) ถูกเขียนแบบ act (ΔA≠0, A เพี้ยน)
+    prices = [10.0, 12.0, 11.0, 9.0]
+    holdings = [150.0, 150.0, 136.36364, 136.36364]
+    data = _mk_chain(prices, holdings, [1, 1, 1, 1])
+    df = rows_to_df(data)
+    a1 = float(df.iloc[1]["Aₙ สะสม (USD)"])              # A หลังแถว act ล่าสุด (idx 1)
+    key = sorted(data, key=lambda k: data[k]["version"])[2]
+    bad = {k: dict(v) for k, v in data.items()}
+    act_dA = FIX_C * (11.0 / 12.0 - 1.0)
+    bad[key]["ΔAₙ ต่อสเต็ป (USD)"] = act_dA               # engine act ผิดบน PASS_THRESHOLD
+    bad[key]["Aₙ สะสม (USD)"] = a1 + act_dA
+    bad_df = rows_to_df(bad)
+    _, ok_bad = integrity_report(bad_df, p0_hint=10.0)
+    assert not ok_bad                                    # ค่าดิบจาก engine = ผิด
+
+    fixed = recompute_gated_ledger(bad_df, p0=10.0)
+    assert fixed.iloc[2]["ΔAₙ ต่อสเต็ป (USD)"] == 0.0     # แช่แข็ง: ΔA=0
+    assert fixed.iloc[2]["Aₙ สะสม (USD)"] == a1          # Aₙ ค้างจาก act ล่าสุด
+    _, ok_fixed = integrity_report(fixed, p0_hint=10.0)
+    assert ok_fixed, "หลัง recompute ต้องผ่านทุกสมการ"
+    assert count_ledger_corrections(bad_df, fixed) == 1  # แก้ 1 แถว
+
+
+def test_recompute_gated_ledger_noop_on_correct_chain():
+    df = rows_to_df(_mk_chain(PRICES, HOLD, SIGNALS))
+    fixed = recompute_gated_ledger(df, p0=10.0)
+    cols = ["Rₙ อ้างอิง (USD)", "ΔAₙ ต่อสเต็ป (USD)",
+            "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]
+    for col in cols:
+        for a, b in zip(df[col].astype(float), fixed[col].astype(float)):
+            assert abs(a - b) <= 1e-9                    # chain ถูกอยู่แล้ว -> no-op
+    assert count_ledger_corrections(df, fixed) == 0
+    assert recompute_gated_ledger(rows_to_df(None)).empty  # ว่าง -> ว่าง
+
+
+def test_recompute_all_pass_signal1_stays_frozen_at_anchor():
+    # ตรงกับหน้าจอจริง: ทุกแถว PASS_THRESHOLD (signal=1), ไม่เคยเทรด -> Aₙ=0 ตลอด
+    prices, holdings = [321.2, 321.96], [9.3449, 9.3449]
+    # บังคับสถานะ PASS_THRESHOLD ทั้งคู่ด้วย FIX_C ใหญ่ (gap เล็ก) — สร้างแถวตรง ๆ
+    import math as _m
+    rows = {}
+    for n, (p, h) in enumerate(zip(prices, holdings)):
+        rows[f"r{n:029d}"] = {
+            "เวลา (UTC)": f"t{n}", "สินทรัพย์": "AAPL", "สถานะ": "PASS_THRESHOLD",
+            "DNA step": n, "DNA signal": 1, "ราคา Pₙ (USD)": p,
+            "จำนวนถือครอง (หุ้น)": h, "คำสั่ง": "PASS", "ฝั่ง": "",
+            "เหตุผล": "PASS_THRESHOLD", "จำนวนสั่ง (หุ้น)": 0.0,
+            "มูลค่าพอร์ต (USD)": h * p, "ส่วนต่างเป้าหมาย (USD)": 3000.0 - h * p,
+            "Rₙ อ้างอิง (USD)": 0.0 if n == 0 else 3000.0 * _m.log(p / prices[0]),
+            # engine เขียนผิด: act บนแถว 1
+            "ΔAₙ ต่อสเต็ป (USD)": 0.0 if n == 0 else 3000.0 * (p / prices[0] - 1.0),
+            "Aₙ สะสม (USD)": 0.0 if n == 0 else 3000.0 * (p / prices[0] - 1.0),
+            "Eₙ ส่วนเกินสะสม (USD)": 0.0,
+            "run_id": f"r{n:029d}", "chain_key": "AAPL_x", "version": n + 1,
+            "committed": True, "semantics": "gated_theoretical_v2",
+        }
+    fixed = recompute_gated_ledger(rows_to_df(rows))       # genesis -> P₀ = ราคาแถวแรก
+    assert list(fixed["ΔAₙ ต่อสเต็ป (USD)"].astype(float)) == [0.0, 0.0]
+    assert list(fixed["Aₙ สะสม (USD)"].astype(float)) == [0.0, 0.0]
+    assert list(fixed["Eₙ ส่วนเกินสะสม (USD)"].astype(float)) == [0.0, 0.0]
+    _, ok = integrity_report(fixed)
+    assert ok
 
 
 def test_default_chain_index_latest_by_updated_at():
