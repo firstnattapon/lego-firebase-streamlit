@@ -5,7 +5,8 @@ import math
 
 import pandas as pd
 
-from lego_dash_core import integrity_report, recompute_gated_ledger
+from lego_dash_core import (count_ledger_corrections, integrity_report,
+                            recompute_gated_ledger)
 
 
 FIX_C = 3000.0
@@ -76,6 +77,53 @@ def test_all_non_ready_statuses_freeze_for_both_signals():
 
     assert list(fixed["ΔAₙ ต่อสเต็ป (USD)"].astype(float))[1:] == [0.0] * 6
     assert len(set(fixed["Aₙ สะสม (USD)"].astype(float).tolist())) == 1
+
+
+def test_reference_rn_never_freezes_on_pass_rows():
+    df = _rows([
+        (1, "READY_BUY", 1.0),
+        (0, "PASS_DNA_ZERO", 0.0),
+        (1, "PASS_THRESHOLD", 0.0),
+        (1, "PASS", 0.0),
+    ])
+    # Simulate the bug: engine freezes Rₙ at zero throughout all PASS rows.
+    df.loc[1:, "Rₙ อ้างอิง (USD)"] = 0.0
+
+    fixed = recompute_gated_ledger(df, p0=P0)
+    expected = [FIX_C * math.log(float(p) / P0)
+                for p in fixed["ราคา Pₙ (USD)"]]
+
+    assert list(fixed["Rₙ อ้างอิง (USD)"].astype(float)) == expected
+    assert len(set(fixed["Rₙ อ้างอิง (USD)"].astype(float).tolist())) == 4
+    assert list(fixed["ΔAₙ ต่อสเต็ป (USD)"].astype(float))[1:] == [0.0, 0.0, 0.0]
+    assert count_ledger_corrections(df, fixed) == 3
+
+
+def test_reference_rn_recomputed_on_non_genesis_first_row_when_p0_known():
+    df = _rows([
+        (0, "PASS_DNA_ZERO", 0.0),
+        (1, "PASS_THRESHOLD", 0.0),
+    ])
+    df["DNA step"] = [12, 13]
+    df["version"] = [13, 14]
+    df["ราคา Pₙ (USD)"] = [330.0, 332.0]
+    df["มูลค่าพอร์ต (USD)"] = 9.3 * df["ราคา Pₙ (USD)"]
+    df["ส่วนต่างเป้าหมาย (USD)"] = FIX_C - df["มูลค่าพอร์ต (USD)"]
+    df["Rₙ อ้างอิง (USD)"] = 0.0
+
+    fixed = recompute_gated_ledger(df, p0=P0)
+    assert math.isclose(
+        float(fixed.iloc[0]["Rₙ อ้างอิง (USD)"]),
+        FIX_C * math.log(330.0 / P0),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        float(fixed.iloc[1]["Rₙ อ้างอิง (USD)"]),
+        FIX_C * math.log(332.0 / P0),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
 
 
 def test_signal_zero_ready_status_is_still_frozen():
