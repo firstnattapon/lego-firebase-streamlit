@@ -1,3 +1,4 @@
 streamlit>=1.49
 firebase-admin==6.*
 pandas>=2.0
+numpy>=1.24
