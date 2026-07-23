@@ -289,6 +289,111 @@ def test_order_columns_groups_semantics_with_meta():
                                        "committed", "semantics"]
 
 
+# ---- Rebalancing 101: gated demo (DNA gate + frozen ledger) ----------------
+# golden จาก gated demo CSV เดียวกับ Webull_Dashboard/manual_tools.py (source of truth)
+from lego_dash_core import (build_gate_actions,
+                            gated_rebalancing_cashflow_from_prices,
+                            rebalancing_cashflow_from_prices,
+                            simulate_rebalancing_prices)
+from dna_engine import DNAError, decode_dna
+
+
+def _close(a: float, b: float, tol: float = 1e-4) -> bool:
+    return abs(float(a) - float(b)) <= tol
+
+
+def test_gated_cashflow_matches_gated_demo_csv_goldens():
+    prices = [96.81133514, 89.17306809, 91.27812248]
+    rows = gated_rebalancing_cashflow_from_prices(prices, 1500.0, 100.0, [1, 1, 0])
+    # รอบ 2 act: ΔA เทียบราคา act ก่อนหน้า (แช่ที่ 96.811)
+    assert _close(rows[2]["delta_actual"], -118.3477179)
+    assert _close(rows[2]["actual_cumulative"], -166.1776908)
+    assert _close(rows[2]["excess"], 5.708988114)
+    # รอบ 3 pass: A ค้าง, P_acted แช่แข็ง, smooth E ค้างค่า act ล่าสุด
+    assert rows[3]["delta_actual"] == 0.0
+    assert _close(rows[3]["actual_cumulative"], -166.1776908)
+    assert _close(rows[3]["acted_price"], 89.17306809)
+    assert _close(rows[3]["excess"], 5.708988114)
+
+
+def test_gated_cashflow_react_after_freeze_one_big_step():
+    # แช่ที่ 89.173 ช่วง pass แล้ว act ที่ 110.725 -> ΔA ก้อนเดียว 362.53
+    prices = [96.81133514, 89.17306809, 91.27812248, 93.96129271, 110.7252073]
+    rows = gated_rebalancing_cashflow_from_prices(
+        prices, 1500.0, 100.0, [1, 1, 0, 0, 1])
+    assert _close(rows[5]["delta_actual"], 362.533325)
+    assert _close(rows[5]["actual_cumulative"], 196.3556342)
+    assert _close(rows[5]["excess"], 43.53362969)
+
+
+def test_gated_cashflow_excess_monotone_nonnegative():
+    prices = simulate_rebalancing_prices(100.0, 0.05, 0.0, 50, 7)
+    actions = build_gate_actions("26021034252903219354832053493", len(prices))
+    rows = gated_rebalancing_cashflow_from_prices(prices, 1500.0, 100.0, actions)
+    excesses = [r["excess"] for r in rows]
+    assert all(b >= a - 1e-9 for a, b in zip(excesses, excesses[1:]))
+    assert excesses[-1] >= 0.0
+
+
+def test_gated_cashflow_all_pass_equals_frozen_anchor():
+    rows = gated_rebalancing_cashflow_from_prices(
+        [120.0, 80.0], 1500.0, 100.0, [0, 0])
+    assert all(r["actual_cumulative"] == 0.0 for r in rows)
+    assert all(r["acted_price"] == 100.0 for r in rows)
+    assert all(r["excess"] == 0.0 for r in rows)          # smooth ค้างค่า anchor
+
+
+def test_gated_cashflow_validation_fail_closed():
+    for bad in ([2], ):                                   # action นอก {0,1}
+        try:
+            gated_rebalancing_cashflow_from_prices([100.0], 1500.0, 100.0, bad)
+            assert False, "action นอก {0,1} ต้อง raise"
+        except ValueError:
+            pass
+    for kwargs in ([0.0], 1500.0, 100.0, [1]), ([100.0], -1.0, 100.0, [1]):
+        try:
+            gated_rebalancing_cashflow_from_prices(*kwargs)
+            assert False, "input ผิดต้อง raise"
+        except ValueError:
+            pass
+
+
+def test_pass_all_equals_gated_all_ones():
+    prices = [120.0, 80.0, 130.0]
+    passed = rebalancing_cashflow_from_prices(prices, 1500.0, 100.0)
+    gated = gated_rebalancing_cashflow_from_prices(prices, 1500.0, 100.0, [1, 1, 1])
+    for a, b in zip(passed, gated):
+        assert _close(a["actual_cumulative"], b["actual_cumulative"])
+        assert _close(a["excess"], b["excess"])
+
+
+def test_build_gate_actions_matches_engine_decode_and_tiles():
+    # decode ต้องตรง engine: 60 slot, 25 ones, dna[0]=1, head ตาม champion
+    gate = decode_dna("26021034252903219354832053493")
+    assert len(gate) == 60 and sum(gate) == 25 and gate[0] == 1
+    assert gate[:20] == [1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                         0, 1, 0, 0, 1, 1, 0, 1, 1, 1]
+    # build_gate_actions: ตัดให้พอดี n, และวนซ้ำเมื่อ DNA สั้นกว่า n
+    assert build_gate_actions("bypass:5", 3) == [1, 1, 1]
+    tiled = build_gate_actions("26021034252903219354832053493", 100)
+    assert len(tiled) == 100
+    assert tiled[:60] == gate                             # 60 แรกตรง decode
+    assert tiled[60:100] == gate[:40]                     # ที่เหลือวนซ้ำ
+    try:
+        build_gate_actions("not-a-dna", 10)
+        assert False, "DNA ผิดต้อง raise DNAError"
+    except DNAError:
+        pass
+
+
+def test_simulate_prices_deterministic_and_positive():
+    a = simulate_rebalancing_prices(100.0, 0.04, 0.0, 30, 101)
+    b = simulate_rebalancing_prices(100.0, 0.04, 0.0, 30, 101)
+    assert a == b and len(a) == 30 and all(p > 0 for p in a)   # deterministic
+    c = simulate_rebalancing_prices(100.0, 0.04, 0.0, 30, 202)
+    assert a != c                                              # seed ต่าง -> เส้นต่าง
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import math
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
+
+from dna_engine import decode_dna
 
 # mirror ของ lego_one_row.COLUMN_ORDER (สัญญา 17 คอลัมน์ ลำดับตายตัว)
 COLUMN_ORDER = [
@@ -259,3 +262,148 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
 
     report = pd.DataFrame(checks, columns=["ข้อ", "สมการ/กฎ", "residual สูงสุด", "ผ่าน", "หมายเหตุ"])
     return report, bool(report["ผ่าน"].all())
+
+
+# ============================================================================
+# Rebalancing 101 — gated demo (DNA gate + บัญชีแบบแช่แข็ง / frozen ledger)
+# ----------------------------------------------------------------------------
+# playground เชิงสอน: สุ่มราคาแล้วเดิน ledger ทฤษฎีแบบ gated_theoretical_v2 เดียวกับ
+# engine เพื่อเห็นว่า "รอบที่ DNA signal=1 แต่ตัดสินใจ PASS (จำนวนสั่ง = 0)" ถูกบันทึก
+# ในบัญชีแบบแช่แข็งอย่างไร — holdings แช่ตั้งแต่ act ล่าสุด, ΔAₙ = 0, Eₙ ค้าง (smooth)
+# สูตรตรงกับ gated_rebalancing_cashflow_from_prices ของ Webull_Dashboard/manual_tools.py
+# และ compute_recurrence ของ lego-firebase/lego_one_row.py
+# ============================================================================
+
+MAX_REBALANCING_STEPS = 2000
+DEFAULT_GATED_DNA = "26021034252903219354832053493"
+
+
+def simulate_rebalancing_prices(p0: float, vol: float, drift: float,
+                                steps: int, seed: int) -> list[float]:
+    """เส้นราคาสุ่มของ Testing Lab (geometric Brownian ต่อรอบ) — deterministic
+
+    ``Pᵢ = Pᵢ₋₁ × exp((drift − vol²/2) + vol × Z)`` โดย ``Z`` จาก default_rng(seed)
+    floor ที่ ``P₀ × 1e-8`` เพื่อให้ ln(Pᵢ/P₀) นิยามได้เสมอ
+    """
+    if not all(math.isfinite(float(x)) for x in (p0, vol, drift)):
+        raise ValueError("p0, vol, and drift must be finite")
+    if p0 <= 0:
+        raise ValueError("p0 must be greater than 0")
+    if vol < 0:
+        raise ValueError("vol cannot be negative")
+    if steps < 2 or steps > MAX_REBALANCING_STEPS:
+        raise ValueError(f"steps must be between 2 and {MAX_REBALANCING_STEPS}")
+
+    rng = np.random.default_rng(int(seed))
+    prices: list[float] = []
+    price = float(p0)
+    for _ in range(int(steps)):
+        shock = (drift - 0.5 * vol * vol) + vol * float(rng.standard_normal())
+        price = max(price * math.exp(shock), p0 * 1e-8)
+        prices.append(price)
+    return prices
+
+
+def rebalancing_cashflow_from_prices(prices: Iterable[float], fix_c: float,
+                                     p0: float) -> list[dict[str, float]]:
+    """เส้น pass-all (act ทุกรอบ) — baseline เทียบกับ gated
+
+    Step 0 anchor ที่ P₀ ; ทุกราคา ``Pᵢ``: ``ΔAᵢ = Fix_c × (Pᵢ/Pᵢ₋₁ − 1)``,
+    ``Rₙ = Fix_c × ln(Pₙ/P₀)``, ``Eₙ = Aₙ − Rₙ``
+    (เท่ากับ gated ที่ actions เป็น 1 ทุกตัว)
+    """
+    if not math.isfinite(float(fix_c)) or not math.isfinite(float(p0)):
+        raise ValueError("fix_c and p0 must be finite")
+    if fix_c <= 0 or p0 <= 0:
+        raise ValueError("fix_c and p0 must be greater than 0")
+
+    rows: list[dict[str, float]] = [{
+        "step": 0, "price": float(p0), "delta_actual": 0.0,
+        "actual_cumulative": 0.0, "ln_reference": 0.0, "excess": 0.0,
+    }]
+    previous = float(p0)
+    actual = 0.0
+    for step, raw_price in enumerate(prices, start=1):
+        price = float(raw_price)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Every price must be finite and greater than 0")
+        delta = fix_c * (price / previous - 1.0)
+        actual += delta
+        reference = fix_c * math.log(price / p0)
+        rows.append({
+            "step": step, "price": price, "delta_actual": float(delta),
+            "actual_cumulative": float(actual), "ln_reference": float(reference),
+            "excess": float(actual - reference),
+        })
+        previous = price
+    return rows
+
+
+def gated_rebalancing_cashflow_from_prices(prices: Iterable[float], fix_c: float,
+                                           p0: float,
+                                           actions: Iterable[int]
+                                           ) -> list[dict[str, float]]:
+    """Gated demo ledger (gated_theoretical_v2) — เหมือน lego-firebase engine
+
+    ``actions[i] ∈ {0,1}`` คือ gate ของรอบ ``i+1`` (รอบ 0 = จุด anchor เสมอ):
+      act (1):  ``ΔAᵢ = Fix_c × (Pᵢ/P_acted − 1)`` โดย ``P_acted`` = ราคารอบ act
+                ล่าสุด แล้วเลื่อน ``P_acted = Pᵢ`` ; ``Eᵢ = Aᵢ − Rᵢ``
+      pass (0): ``ΔAᵢ = 0``, ``Aᵢ`` ค้าง, ``P_acted`` แช่แข็ง และ
+                ``Eᵢ = Aᵢ − Fix_c × ln(P_acted/P₀)`` (smooth — ค้างค่า act ล่าสุด)
+
+    เหตุผลเศรษฐศาสตร์: ช่วง pass ไม่มีการ rebalance — holdings แช่แข็งตั้งแต่
+    act ล่าสุด กำไรจริงจึงเป็นก้อนเดียวเทียบราคาแช่แข็งตอน act ใหม่
+    คุณสมบัติ: ``Eₙ`` ไม่ลด และ ≥ 0 เสมอ (จาก ``x − 1 ≥ ln x`` ต่อ segment)
+    """
+    if not math.isfinite(float(fix_c)) or not math.isfinite(float(p0)):
+        raise ValueError("fix_c and p0 must be finite")
+    if fix_c <= 0 or p0 <= 0:
+        raise ValueError("fix_c and p0 must be greater than 0")
+
+    rows: list[dict[str, float]] = [{
+        "step": 0, "action": 1, "price": float(p0), "acted_price": float(p0),
+        "delta_actual": 0.0, "actual_cumulative": 0.0, "ln_reference": 0.0,
+        "excess": 0.0,
+    }]
+    acted = float(p0)
+    actual = 0.0
+    for step, (raw_price, raw_action) in enumerate(zip(prices, actions), start=1):
+        price = float(raw_price)
+        action = int(raw_action)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Every price must be finite and greater than 0")
+        if action not in (0, 1):
+            raise ValueError("Every action must be 0 or 1")
+        reference = fix_c * math.log(price / p0)
+        if action == 1:
+            delta = fix_c * (price / acted - 1.0)
+            actual += delta
+            acted = price
+            excess = actual - reference
+        else:
+            delta = 0.0
+            excess = actual - fix_c * math.log(acted / p0)
+        rows.append({
+            "step": step, "action": action, "price": price,
+            "acted_price": float(acted), "delta_actual": float(delta),
+            "actual_cumulative": float(actual), "ln_reference": float(reference),
+            "excess": float(excess),
+        })
+    return rows
+
+
+def build_gate_actions(dna_code: str, n_rounds: int) -> list[int]:
+    """decode DNA -> gate array 0/1 แล้วตัด/วนให้ยาวเท่า n_rounds (รอบ act ต่อ demo)
+
+    ยึด decode เดียวกับ engine (dna_engine.decode_dna) — gate เพี้ยนไม่ได้
+    DNA สั้นกว่าจำนวนรอบ -> วนซ้ำ (เฉพาะ demo; engine จริง step +1 จน DNA หมดแล้ว fail)
+    """
+    if n_rounds < 0:
+        raise ValueError("n_rounds ต้อง >= 0")
+    gate = [int(x) for x in decode_dna(dna_code.strip())]
+    if not gate:
+        raise ValueError("decode_dna คืน array ว่าง")
+    if len(gate) < n_rounds:
+        reps = -(-n_rounds // len(gate))       # ceil division
+        gate = gate * reps
+    return gate[:n_rounds]
