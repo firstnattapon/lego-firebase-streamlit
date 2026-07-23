@@ -20,11 +20,12 @@ from firebase_admin import credentials, db
 
 from dna_engine import DNAError
 from lego_dash_core import (DEFAULT_GATED_DNA, MAX_REBALANCING_STEPS, MONEY_COLS,
-                            build_gate_actions, default_chain_index,
-                            filter_audit_rows,
+                            build_gate_actions, count_ledger_corrections,
+                            default_chain_index, filter_audit_rows,
                             gated_rebalancing_cashflow_from_prices,
                             integrity_report, order_columns,
-                            rebalancing_cashflow_from_prices, rows_to_df,
+                            rebalancing_cashflow_from_prices,
+                            recompute_gated_ledger, rows_to_df,
                             simulate_rebalancing_prices)
 
 ROWS_PATH = "webull_lego_rows"
@@ -84,6 +85,24 @@ def render_live_dashboard() -> None:
     elif chains:
         st.caption(f"Chain: {chains[0]}")
 
+    # P₀ จาก state pointer (chain ตัดหน้า) — genesis จะ fallback = ราคาแถวแรกใน recompute
+    p0_hint = None
+    if selected and isinstance(state, dict):
+        raw = (state.get(selected) or {}).get("p0")
+        p0_hint = float(raw) if raw is not None else None
+
+    # dashboard เป็น read-only: ไม่เชื่อค่า recurrence ที่ engine เขียน (อาจมี PASS ที่ยัง
+    # act ผิด) → derive ledger ใหม่ตามหลักการแช่แข็ง จากราคา+การตัดสินใจ ก่อนแสดงเสมอ
+    df_fixed = recompute_gated_ledger(df, p0=p0_hint)
+    n_corr = count_ledger_corrections(df, df_fixed)
+    if n_corr:
+        st.warning(
+            f"⚠️ engine เขียน ledger ผิด {n_corr} แถว (แถว PASS ที่ยัง act — ΔAₙ ≠ 0) "
+            "— ตาราง/กราฟด้านล่างถูก **คำนวณใหม่ตามหลักการแช่แข็ง** (ทุก PASS ทั้ง "
+            "PASS_DNA_ZERO และ PASS_THRESHOLD → ΔAₙ = 0, Aₙ ค้าง) ควรแก้ engine ต้นทางด้วย"
+        )
+    df = df_fixed
+
     latest = df.iloc[-1]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("สถานะล่าสุด", latest.get("สถานะ", "—"))
@@ -108,16 +127,13 @@ def render_live_dashboard() -> None:
             show[col] = show[col].astype(float).round(2)
     st.dataframe(show, width="stretch")
 
-    # integrity: ตรวจจากค่า full precision (ก่อน round) ของ chain ที่เลือก
+    # integrity: ตรวจจากค่า full precision ที่ "แสดงจริง" (recomputed) — ต้องผ่านเสมอ
     with st.expander("🔎 Integrity check — สมการ LEGO (E1–E8)", expanded=False):
-        p0_hint = None
-        if selected and isinstance(state, dict):
-            raw = (state.get(selected) or {}).get("p0")
-            p0_hint = float(raw) if raw is not None else None
         report, ok = integrity_report(df, p0_hint=p0_hint)
         st.dataframe(report, width="stretch")
         if ok:
-            st.success("ทุกสมการผ่าน — แถวบน RTDB สอดคล้อง LEGO invariant")
+            st.success("ทุกสมการผ่าน — ค่าที่แสดง (คำนวณใหม่) สอดคล้อง LEGO invariant"
+                       + (f" · แก้จาก engine {n_corr} แถว" if n_corr else ""))
         else:
             st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
 

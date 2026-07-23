@@ -272,6 +272,94 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     return report, bool(report["ผ่าน"].all())
 
 
+def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None) -> pd.DataFrame:
+    """คำนวณคอลัมน์ recurrence (Rₙ, ΔAₙ, Aₙ, Eₙ) ใหม่จาก input ที่เชื่อถือได้
+    (ราคา Pₙ + การตัดสินใจ traded + P₀) ตามหลักการ "บัญชีแบบแช่แข็ง"
+
+    ใช้เพราะ dashboard เป็น read-only: ถ้า engine เขียน recurrence ผิด (เช่นแถว PASS
+    ที่ยัง act, ΔAₙ ≠ 0) เราจะ "ไม่เชื่อ" ค่าที่เก็บมา แต่ derive ใหม่จากราคา+การตัดสินใจ
+    เพื่อให้ตาราง/กราฟที่ "แสดง" ถูกต้องตามหลักการเสมอ (PASS ทุกชนิดต้องแช่แข็ง)
+
+    act (READY_BUY/READY_SELL, เทรดจริง): ΔAₙ = FIX_C×(Pₙ/P_acted−1), เลื่อน P_acted=Pₙ,
+        Eₙ = Aₙ − Rₙ
+    pass (จำนวนสั่ง=0 — PASS_DNA_ZERO หรือ PASS_THRESHOLD): ΔAₙ = 0, Aₙ ค้าง,
+        P_acted แช่แข็ง, Eₙ = Aₙ − FIX_C×ln(P_acted/P₀)
+    แถว semantics เก่า (legacy/cycle_realized_v1) -> คงค่าเดิม (ไม่แตะ)
+
+    เป็น no-op กับ chain ที่ค่าถูกอยู่แล้ว (residual 0) จึงปลอดภัยจะเรียกก่อนแสดงผลเสมอ
+    """
+    required = ["ราคา Pₙ (USD)", "สถานะ", "DNA step", "มูลค่าพอร์ต (USD)",
+                "ส่วนต่างเป้าหมาย (USD)", "Rₙ อ้างอิง (USD)", "ΔAₙ ต่อสเต็ป (USD)",
+                "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]
+    if df.empty or any(c not in df.columns for c in required):
+        return df                                     # fail safe: ไม่ครบคอลัมน์ -> ไม่แตะ
+    out = df.reset_index(drop=True).copy()
+    p = out["ราคา Pₙ (USD)"].astype(float)
+    fix_c = float((out["มูลค่าพอร์ต (USD)"].astype(float)
+                   + out["ส่วนต่างเป้าหมาย (USD)"].astype(float)).iloc[0])
+    step = out["DNA step"].astype(int)
+    status = out["สถานะ"].astype(str)
+    genesis = bool(step.iloc[0] == 0)
+    if p0 is None and genesis:
+        p0 = float(p.iloc[0])                          # แถว genesis: P₀ = ราคาแถวแรก
+    can_ref = p0 is not None and p0 > 0
+    gated = ((out["semantics"].astype(str) == GATED_SEMANTICS).tolist()
+             if "semantics" in out.columns else [True] * len(out))
+    traded = status.isin([READY_BUY, READY_SELL]).tolist()
+
+    R = out["Rₙ อ้างอิง (USD)"].astype(float).tolist()
+    dA = out["ΔAₙ ต่อสเต็ป (USD)"].astype(float).tolist()
+    A = out["Aₙ สะสม (USD)"].astype(float).tolist()
+    E = out["Eₙ ส่วนเกินสะสม (USD)"].astype(float).tolist()
+
+    acted: float | None = None
+    A_prev = 0.0
+    for i in range(len(out)):
+        Pi = float(p.iloc[i])
+        if i == 0:
+            if genesis:                               # anchor เริ่มต้น: ทุกค่า = 0
+                R[i] = dA[i] = A[i] = E[i] = 0.0
+                acted, A_prev = Pi, 0.0
+            else:                                     # chain ตัดหน้ามา -> เชื่อ anchor เดิม
+                acted, A_prev = Pi, float(A[i])
+            continue
+        if not gated[i]:                              # legacy: คงค่าเดิม, เลื่อน pointer ทุกแถว
+            acted, A_prev = Pi, float(A[i])
+            continue
+        if acted is None:                             # ไม่มี genesis ในชุด -> ใช้แถวก่อนหน้า
+            acted, A_prev = float(p.iloc[i - 1]), float(A[i - 1])
+        if can_ref:
+            R[i] = fix_c * math.log(Pi / p0)
+        if traded[i]:                                 # act: ก้าวหนึ่งก้อนจาก P_acted
+            d = fix_c * (Pi / acted - 1.0)
+            A_prev += d
+            dA[i], A[i], E[i] = d, A_prev, A_prev - R[i]
+            acted = Pi
+        else:                                         # pass: แช่แข็ง (ทุก PASS รวม signal=1)
+            dA[i], A[i] = 0.0, A_prev
+            if can_ref:
+                E[i] = A_prev - fix_c * math.log(acted / p0)
+
+    out["Rₙ อ้างอิง (USD)"] = R
+    out["ΔAₙ ต่อสเต็ป (USD)"] = dA
+    out["Aₙ สะสม (USD)"] = A
+    out["Eₙ ส่วนเกินสะสม (USD)"] = E
+    return out
+
+
+def count_ledger_corrections(stored: pd.DataFrame, fixed: pd.DataFrame,
+                             tol: float = 1e-6) -> int:
+    """นับแถวที่ recompute_gated_ledger แก้ค่า recurrence (stored ≠ fixed)
+    ใช้เตือนบน dashboard ว่า engine เขียน ledger ผิดกี่แถว (ควรไปแก้ engine ต้นทาง)"""
+    cols = ["ΔAₙ ต่อสเต็ป (USD)", "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]
+    if stored.empty or any(c not in stored.columns or c not in fixed.columns
+                           for c in cols):
+        return 0
+    a = stored.reset_index(drop=True)[cols].astype(float)
+    b = fixed.reset_index(drop=True)[cols].astype(float)
+    return int(((a - b).abs().max(axis=1) > tol).sum())
+
+
 # ============================================================================
 # Rebalancing 101 — gated demo (DNA gate + บัญชีแบบแช่แข็ง / frozen ledger)
 # ----------------------------------------------------------------------------
