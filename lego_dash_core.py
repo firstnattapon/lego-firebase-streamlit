@@ -38,8 +38,12 @@ COLUMN_ORDER = [
 META_COLS = ["run_id", "chain_key", "version", "committed", "semantics"]
 
 # mirror ของ lego_state.CASHFLOW_SEMANTICS — ledger ทฤษฎีแบบ gated (ตาม gated demo):
-#   act (signal=1):  ΔAₙ = FIX_C×(Pₙ/P_acted − 1) โดย P_acted = ราคาแถว act ล่าสุด
-#   pass (signal=0): ΔAₙ = 0, Aₙ ค้าง, P_acted แช่แข็ง, Eₙ smooth (ค้างค่า act ล่าสุด)
+#   ledger คีย์ที่ "เทรดจริงหรือไม่" (การตัดสินใจ) ไม่ใช่ DNA signal ดิบ:
+#   act (เทรดจริง READY_BUY/READY_SELL, จำนวนสั่ง > 0):
+#       ΔAₙ = FIX_C×(Pₙ/P_acted − 1) โดย P_acted = ราคาแถว act ล่าสุด
+#   pass (ไม่เทรด — จำนวนสั่ง = 0): ΔAₙ = 0, Aₙ ค้าง, P_acted แช่แข็ง, Eₙ smooth
+#       *รวม PASS_DNA_ZERO (signal=0) และ PASS_THRESHOLD (signal=1 แต่ |gap| ≤ DIFF):
+#        ทั้งคู่ไม่ยิง order จึงต้องแช่แข็ง ledger เหมือนกัน (ΔAₙ = 0)
 GATED_SEMANTICS = "gated_theoretical_v2"
 # semantics เก่า (ก่อน v2): ΔAₙ = กำไร realized จากรอบ Buy↔Sell ที่จับคู่ปิด
 LEGACY_REALIZED_SEMANTICS = "cycle_realized_v1"
@@ -121,9 +125,10 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
       E1  FIX_C คงที่:   Vₙ + gapₙ = FIX_C ทุกแถว   (นิยาม gap = FIX_C − Vₙ)
       E2  มูลค่าพอร์ต:    Vₙ = holdingsₙ × Pₙ
       E3  อ้างอิง:        Rₙ = FIX_C × ln(Pₙ / P₀)
-      E4  ต่อสเต็ป (gated): act (signal=1) -> ΔAₙ = FIX_C × (Pₙ / P_acted − 1)
-                         โดย P_acted = ราคาแถว act ล่าสุด (reconstruct จาก signal series)
-                         pass (signal=0) -> ΔAₙ = 0
+      E4  ต่อสเต็ป (gated): act (เทรดจริง READY_BUY/READY_SELL) ->
+                         ΔAₙ = FIX_C × (Pₙ / P_acted − 1)
+                         โดย P_acted = ราคาแถว act ล่าสุด (reconstruct จาก decision series)
+                         pass (ไม่เทรด PASS_DNA_ZERO/PASS_THRESHOLD) -> ΔAₙ = 0 (แช่แข็ง)
                          แถว semantics เก่า (legacy/cycle_realized_v1) -> ข้ามพร้อมหมายเหตุ
       E5  สะสม:          Aₙ = Aₙ₋₁ + ΔAₙ — ข้ามเฉพาะรอยต่อเปลี่ยน semantics
                          (baseline Aₙ รีเซ็ตเป็น 0)
@@ -145,6 +150,9 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     sig = df["DNA signal"].astype(int)
     qty = df["จำนวนสั่ง (หุ้น)"].astype(float)
     status = df["สถานะ"].astype(str)
+    # act = "เทรดจริง" (READY_BUY/READY_SELL) เท่านั้น — ทุก PASS (รวม PASS_THRESHOLD
+    # ที่ signal=1 แต่ |gap| ≤ DIFF) ถือเป็น pass ต้องแช่แข็ง ledger (ไม่คีย์ที่ DNA signal)
+    traded = status.isin([READY_BUY, READY_SELL]).tolist()
 
     fixc_series = v + gap
     fix_c = float(fixc_series.iloc[0])
@@ -178,8 +186,8 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     else:
         gated = [False] * len(df)
 
-    # reconstruct P_acted (ราคาแถว act ล่าสุด) จาก signal series:
-    # act (signal=1) -> เลื่อนเป็น Pₙ ; pass (signal=0) -> แช่แข็ง
+    # reconstruct P_acted (ราคาแถว act ล่าสุด) จาก decision series:
+    # act (เทรดจริง READY_BUY/READY_SELL) -> เลื่อนเป็น Pₙ ; pass (จำนวนสั่ง=0) -> แช่แข็ง
     # prev_acted[i] = P_acted "ก่อน" แถว i (None = ยังไม่รู้ เช่นตัดหน้า chain มา)
     n = len(df)
     prev_acted: list[float | None] = [None] * n
@@ -190,8 +198,8 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
             acted = float(p.iloc[0])            # genesis: P_acted เริ่ม = P₀
         elif not gated[i]:
             acted = float(p.iloc[i])            # semantics เก่า: pointer เลื่อนทุกแถว
-        elif int(sig.iloc[i]) == 1:
-            acted = float(p.iloc[i])
+        elif traded[i]:
+            acted = float(p.iloc[i])            # act เฉพาะแถวที่เทรดจริง (READY_BUY/SELL)
 
     resid4, skip4 = [], 0
     resid6, skip6 = [], 0
@@ -203,14 +211,14 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
             skip6 += 1
             continue
         pa = prev_acted[i]
-        if int(sig.iloc[i]) == 1:
+        if traded[i]:
             if pa is None:
                 skip4 += 1                       # ไม่รู้ P_acted ก่อนหน้า (ตัดหน้า chain)
             else:
                 resid4.append(abs(float(dA.iloc[i]) - fix_c * (float(p.iloc[i]) / pa - 1.0)))
             resid6.append(abs(float(E.iloc[i]) - (float(A.iloc[i]) - float(R.iloc[i]))))
         else:
-            resid4.append(abs(float(dA.iloc[i])))          # pass -> ΔAₙ = 0
+            resid4.append(abs(float(dA.iloc[i])))          # pass (ไม่เทรด) -> ΔAₙ = 0 แช่แข็ง
             if pa is None or p0 is None or p0 <= 0:
                 skip6 += 1                       # smooth E ต้องรู้ P_acted และ P₀
             else:

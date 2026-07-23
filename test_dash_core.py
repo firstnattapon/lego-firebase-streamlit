@@ -21,8 +21,10 @@ DIFF = 60.0
 def _mk_chain(prices: list[float], holdings: list[float], signals: list[int]) -> dict:
     """สร้างแถว committed ตามสูตร LEGO gated_theoretical_v2 เป๊ะ คืน dict แบบ RTDB
 
-    act (signal=1):  ΔA = FIX_C×(Pₙ/P_acted − 1) แล้วเลื่อน P_acted = Pₙ ; E = A − R
-    pass (signal=0): ΔA = 0, A ค้าง, P_acted แช่แข็ง ; E = A − FIX_C×ln(P_acted/P₀)
+    ledger คีย์ที่ "เทรดจริงไหม" (การตัดสินใจ) ไม่ใช่ DNA signal ดิบ:
+    act (READY_BUY/READY_SELL): ΔA = FIX_C×(Pₙ/P_acted − 1) แล้วเลื่อน P_acted = Pₙ ; E = A − R
+    pass (จำนวนสั่ง=0 — PASS_DNA_ZERO/PASS_THRESHOLD): ΔA = 0, A ค้าง, P_acted แช่แข็ง ;
+         E = A − FIX_C×ln(P_acted/P₀) — รวมถึง PASS_THRESHOLD (signal=1 แต่ |gap| ≤ DIFF)
     """
     rows = {}
     p0 = prices[0]
@@ -31,22 +33,8 @@ def _mk_chain(prices: list[float], holdings: list[float], signals: list[int]) ->
     for n, (p, h, sig) in enumerate(zip(prices, holdings, signals)):
         v = h * p
         gap = FIX_C - v
-        if n == 0:
-            R = dA = A = E = 0.0
-            acted = p
-        else:
-            R = FIX_C * math.log(p / p0)
-            if sig == 1:
-                dA = FIX_C * (p / acted - 1.0)
-                A = A_prev + dA
-                E = A - R
-                acted = p
-            else:
-                dA = 0.0
-                A = A_prev
-                E = A - FIX_C * math.log(acted / p0)
-        A_prev = A
 
+        # ตัดสินใจก่อน แล้วค่อย gate ledger ที่ "เทรดจริงไหม" (ไม่ใช่ DNA signal)
         if sig == 0:
             status, action, side, qty = "PASS_DNA_ZERO", "PASS", "", 0.0
         elif abs(gap) <= DIFF:
@@ -55,6 +43,23 @@ def _mk_chain(prices: list[float], holdings: list[float], signals: list[int]) ->
             status, action, side, qty = "READY_BUY", "TRIGGER_ACTION", "BUY", round(gap / p, 5)
         else:
             status, action, side, qty = "READY_SELL", "TRIGGER_ACTION", "SELL", round(-gap / p, 5)
+        traded = status in ("READY_BUY", "READY_SELL")
+
+        if n == 0:
+            R = dA = A = E = 0.0
+            acted = p
+        elif traded:
+            R = FIX_C * math.log(p / p0)
+            dA = FIX_C * (p / acted - 1.0)
+            A = A_prev + dA
+            E = A - R
+            acted = p
+        else:                                     # pass (รวม PASS_THRESHOLD) -> แช่แข็ง
+            R = FIX_C * math.log(p / p0)
+            dA = 0.0
+            A = A_prev
+            E = A - FIX_C * math.log(acted / p0)
+        A_prev = A
 
         row = {
             "เวลา (UTC)": f"2026-07-17T14:{n:02d}:00Z",
@@ -146,6 +151,30 @@ def test_integrity_catches_corruption():
     corrupt("Eₙ ส่วนเกินสะสม (USD)", 123.0, row_idx=2)     # E6 smooth
 
 
+def test_pass_threshold_signal1_freezes_ledger():
+    # หลักการ: PASS_THRESHOLD (signal=1 แต่ |gap| ≤ DIFF, จำนวนสั่ง=0) = ไม่เทรด
+    # ledger ต้องแช่แข็งเหมือน PASS_DNA_ZERO: ΔAₙ=0, Aₙ ค้าง, P_acted แช่แข็ง
+    prices = [10.0, 12.0, 11.0, 9.0]
+    holdings = [150.0, 150.0, 136.36364, 136.36364]
+    signals = [1, 1, 1, 1]            # signal=1 ทุกแถว — แต่แถว idx 2 เป็น PASS_THRESHOLD
+    data = _mk_chain(prices, holdings, signals)
+    df = rows_to_df(data)
+
+    row2 = df.iloc[2]
+    assert row2["สถานะ"] == "PASS_THRESHOLD" and int(row2["DNA signal"]) == 1
+    assert row2["ΔAₙ ต่อสเต็ป (USD)"] == 0.0                     # แช่แข็ง: ΔA=0
+    assert row2["Aₙ สะสม (USD)"] == df.iloc[1]["Aₙ สะสม (USD)"]  # Aₙ ค้างจากแถว act ล่าสุด
+    report, ok = integrity_report(df, p0_hint=10.0)
+    assert ok, f"PASS_THRESHOLD (signal=1) ที่แช่แข็งถูกต้องต้องผ่าน:\n{report}"
+
+    # ตรงข้าม: ถ้า ledger ยัง "act" บนแถว PASS_THRESHOLD (ΔA≠0 ตามราคา) ต้องถูกจับผิด
+    key = sorted(data, key=lambda k: data[k]["version"])[2]
+    bad = {k: dict(v) for k, v in data.items()}
+    bad[key]["ΔAₙ ต่อสเต็ป (USD)"] = FIX_C * (11.0 / 12.0 - 1.0)   # ค่าแบบ act (ผิด)
+    _, ok2 = integrity_report(rows_to_df(bad), p0_hint=10.0)
+    assert not ok2, "PASS_THRESHOLD ที่ยัง act (ΔA≠0) ต้องถูกจับ (E4/E5)"
+
+
 def test_default_chain_index_latest_by_updated_at():
     chains = ["AAPL_aaa", "APLS_zzz", "TSLA_mmm"]
     state = {
@@ -225,12 +254,18 @@ def test_integrity_legacy_realized_rows_skipped_not_judged_by_gated_formula():
 
 def _mk_gated_cont(prices, signals, start_version, start_step,
                    acted0, A_start, p0):
-    """แถว gated_theoretical_v2 ต่อท้าย chain เดิม (ไม่ใช่ genesis)"""
+    """แถว gated_theoretical_v2 ต่อท้าย chain เดิม (ไม่ใช่ genesis)
+
+    ทุกแถวเป็น PASS (จำนวนสั่ง=0) จึงแช่แข็ง ledger ทั้งหมด — ไม่ว่า signal=1
+    (PASS_THRESHOLD) หรือ signal=0 (PASS_DNA_ZERO): ΔA=0, A ค้าง, P_acted แช่แข็ง
+    """
     rows = {}
     A_prev, acted = A_start, acted0
     for n, (p, sig) in enumerate(zip(prices, signals)):
+        status = "PASS_DNA_ZERO" if sig == 0 else "PASS_THRESHOLD"
+        traded = status in ("READY_BUY", "READY_SELL")   # PASS ทุกแถว -> แช่แข็ง
         R = FIX_C * math.log(p / p0)
-        if sig == 1:
+        if traded:
             dA = FIX_C * (p / acted - 1.0)
             A = A_prev + dA
             E = A - R
@@ -243,7 +278,7 @@ def _mk_gated_cont(prices, signals, start_version, start_step,
         row = {
             "เวลา (UTC)": f"2026-07-22T14:{n:02d}:00Z",
             "สินทรัพย์": "APLS",
-            "สถานะ": "PASS_DNA_ZERO" if sig == 0 else "PASS_THRESHOLD",
+            "สถานะ": status,
             "DNA step": start_step + n, "DNA signal": sig,
             "ราคา Pₙ (USD)": p, "จำนวนถือครอง (หุ้น)": 150.0,
             "คำสั่ง": "PASS", "ฝั่ง": "",

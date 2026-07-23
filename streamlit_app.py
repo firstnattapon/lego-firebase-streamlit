@@ -93,9 +93,9 @@ def render_live_dashboard() -> None:
 
     st.subheader("Recurrence: Rₙ (อ้างอิง) vs Aₙ (gated ledger) vs Eₙ (smooth)")
     st.caption(
-        "gated_theoretical_v2: แถว act (signal=1) ΔAₙ = FIX_C×(Pₙ/P_acted−1) "
-        "เทียบราคาแถว act ล่าสุด · แถว pass (signal=0) Aₙ ค้าง, Eₙ ค้างค่า act ล่าสุด "
-        "(smooth) — Eₙ ไม่ลดและ ≥ 0 เสมอ"
+        "gated_theoretical_v2: แถว act (เทรดจริง READY_BUY/SELL) ΔAₙ = FIX_C×(Pₙ/P_acted−1) "
+        "เทียบราคาแถว act ล่าสุด · แถว pass (ไม่เทรด — PASS_DNA_ZERO หรือ PASS_THRESHOLD, "
+        "จำนวนสั่ง = 0) ΔAₙ = 0, Aₙ ค้าง, Eₙ ค้างค่า act ล่าสุด (smooth) — Eₙ ไม่ลดและ ≥ 0 เสมอ"
     )
     chart_df = df.set_index("DNA step")[[
         "Rₙ อ้างอิง (USD)", "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]].astype(float)
@@ -134,17 +134,17 @@ def render_live_dashboard() -> None:
 def render_rebalancing_101() -> None:
     st.subheader("🧬 Gated demo — DNA gate + บัญชีแบบแช่แข็ง (gated_theoretical_v2)")
     st.caption(
-        "ตรงกับ ledger จริงของ lego-firebase (Manual.py principle) — ledger คีย์ที่ DNA "
-        "**signal** ไม่ใช่จำนวนสั่ง: **ทุกแถวรวมแถวจำนวนสั่ง = 0** commit ภายใต้ semantics "
+        "ตรงกับ ledger จริงของ lego-firebase — ledger คีย์ที่ **การเทรดจริง (การตัดสินใจ)** "
+        "ไม่ใช่ DNA signal ดิบ: **ทุกแถวรวมแถวจำนวนสั่ง = 0** commit ภายใต้ semantics "
         "gated_theoretical_v2 (“บัญชีแบบแช่แข็ง”) ไม่มีแถวไหนถูกทิ้ง"
     )
     st.markdown(
-        "- **signal = 1 (act):** ΔAₙ = Fix_c × (Pₙ/P_acted − 1), เลื่อน P_acted = Pₙ, "
-        "Eₙ = Aₙ − Rₙ — เกิด **แม้ตัดสินใจ PASS_THRESHOLD** (|gap| ≤ DIFF, จำนวนสั่ง = 0, "
-        "ไม่ยิง order): order ถูกข้ามแต่ ledger ไม่ถูกข้าม (เช่นแถว PASS_THRESHOLD ใน CSV "
-        "ที่ ΔAₙ ≠ 0)\n"
-        "- **signal = 0 (pass / PASS_DNA_ZERO):** ΔAₙ = 0, holdings แช่แข็งตั้งแต่ act "
-        "ล่าสุด, Aₙ ค้าง, Eₙ smooth (ค้างค่า act ล่าสุด) — Eₙ ไม่ลดและ ≥ 0 เสมอ (x − 1 ≥ ln x)"
+        "- **act (READY_BUY/READY_SELL, จำนวนสั่ง > 0 — เทรดจริง):** ΔAₙ = Fix_c × "
+        "(Pₙ/P_acted − 1), เลื่อน P_acted = Pₙ, Eₙ = Aₙ − Rₙ\n"
+        "- **pass (ไม่เทรด — จำนวนสั่ง = 0):** ΔAₙ = 0, holdings แช่แข็งตั้งแต่ act ล่าสุด, "
+        "Aₙ ค้าง, P_acted แช่แข็ง, Eₙ smooth (ค้างค่า act ล่าสุด) — **รวมทั้ง PASS_DNA_ZERO "
+        "(signal = 0) และ PASS_THRESHOLD (signal = 1 แต่ |gap| ≤ DIFF)**: ทั้งสองไม่ยิง order "
+        "จึงแช่แข็ง ledger เหมือนกัน (ΔAₙ = 0) — Eₙ ไม่ลดและ ≥ 0 เสมอ (x − 1 ≥ ln x)"
     )
 
     pc = st.columns(2)
@@ -192,7 +192,8 @@ def render_rebalancing_101() -> None:
 
         n_pass = len(actions) - sum(actions)
         m = st.columns(4)
-        m[0].metric("act (signal=1) / pass (signal=0)", f"{sum(actions)} / {n_pass}")
+        # เดโมนี้ไม่มีชั้น threshold — DNA gate จึงเท่ากับการตัดสินใจเทรด (act=เทรด, pass=แช่แข็ง)
+        m[0].metric("act (เทรด) / pass (แช่แข็ง)", f"{sum(actions)} / {n_pass}")
         m[1].metric("Gated Aₙ", f"{g_final['actual_cumulative']:+,.2f}")
         m[2].metric("Gated Eₙ (smooth)", f"{g_final['excess']:+,.2f}")
         m[3].metric("Δ เทียบ pass-all Aₙ",
