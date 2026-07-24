@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 
@@ -117,10 +118,16 @@ def parse_dna_spec(dna_code: str) -> DNASpec:
 
 
 # ---- decode: คืน gate array 0/1 (dna[0]=1 เสมอ) ---------------------------
-def decode_dna(dna_code: str) -> list[int]:
+@lru_cache(maxsize=32)
+def _decode_cached(dna_code: str) -> tuple[int, ...]:
+    """decode จริง — cache ได้เพราะ pure + deterministic ตาม invariant
+
+    เก็บเป็น tuple (immutable) เพื่อให้ค่าที่ cache ไว้ถูกแก้จากภายนอกไม่ได้
+    DNAError ไม่ถูก cache (lru_cache ไม่เก็บ exception) จึง fail closed ทุกครั้ง
+    """
     spec = parse_dna_spec(dna_code)
     if spec.kind == "bypass":
-        return [1] * spec.length
+        return (1,) * spec.length
 
     # stream: base PCG64 + multi-mutation flip (ตรงกับตัว encode)
     dna = np.random.default_rng(spec.dna_seed).integers(
@@ -130,7 +137,13 @@ def decode_dna(dna_code: str) -> list[int]:
         mask = np.random.default_rng(seed).random(spec.length) < spec.mutation_rate
         dna[mask] = 1 - dna[mask]
         dna[0] = 1
-    return dna.astype(int).tolist()
+    return tuple(dna.astype(int).tolist())
+
+
+def decode_dna(dna_code: str) -> list[int]:
+    if not isinstance(dna_code, str):
+        raise DNAError(f"dna_code ผิดรูปแบบ: {dna_code!r}")
+    return list(_decode_cached(dna_code))
 
 
 def dna_summary(dna_code: str) -> dict:

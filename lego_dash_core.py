@@ -4,6 +4,12 @@
   - rows_to_df       : RTDB dict -> DataFrame เฉพาะ committed==True เรียง version (fail closed)
   - order_columns    : บังคับลำดับสัญญา 17 คอลัมน์ (RTDB ไม่การันตีลำดับ key) + meta ต่อท้าย
   - integrity_report : ตรวจสมการ LEGO ต่อแถวจากค่า full precision (E1–E8)
+  - recompute_gated_ledger : derive recurrence ใหม่ตามหลักการแช่แข็ง ก่อนแสดงผลเสมอ
+
+นโยบายเดียวทั้งไฟล์ (gated_theoretical_v2):
+  - act เมื่อ **signal = 1 และ สถานะ READY_BUY/READY_SELL และ จำนวนสั่ง > 0** เท่านั้น
+  - ทุกกรณีอื่นแช่แข็ง: ΔAₙ = 0, Aₙ ค้าง, P_acted ค้าง
+  - ไม่แช่แข็ง Rₙ เด็ดขาด — Rₙ = FIX_C × ln(Pₙ/P₀) ตามราคาตลาดทุกแถว
 """
 from __future__ import annotations
 
@@ -40,9 +46,9 @@ META_COLS = ["run_id", "chain_key", "version", "committed", "semantics",
 
 # mirror ของ lego_state.CASHFLOW_SEMANTICS — ledger ทฤษฎีแบบ gated (ตาม gated demo):
 #   ledger คีย์ที่ "เทรดจริงหรือไม่" (การตัดสินใจ) ไม่ใช่ DNA signal ดิบ:
-#   act (เทรดจริง READY_BUY/READY_SELL, จำนวนสั่ง > 0):
+#   act (เทรดจริง READY_BUY/READY_SELL, signal = 1, จำนวนสั่ง > 0):
 #       ΔAₙ = FIX_C×(Pₙ/P_acted − 1) โดย P_acted = ราคาแถว act ล่าสุด
-#   pass (ไม่เทรด — จำนวนสั่ง = 0): ΔAₙ = 0, Aₙ ค้าง, P_acted แช่แข็ง, Eₙ smooth
+#   pass (ไม่เทรด): ΔAₙ = 0, Aₙ ค้าง, P_acted แช่แข็ง, Eₙ smooth
 #       *รวม PASS_DNA_ZERO (signal=0) และ PASS_THRESHOLD (signal=1 แต่ |gap| ≤ DIFF):
 #        ทั้งคู่ไม่ยิง order จึงต้องแช่แข็ง ledger เหมือนกัน (ΔAₙ = 0)
 GATED_SEMANTICS = "gated_theoretical_v2"
@@ -53,6 +59,13 @@ LEGACY_REALIZED_SEMANTICS = "cycle_realized_v1"
 MONEY_COLS = ["ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)",
               "Rₙ อ้างอิง (USD)", "ΔAₙ ต่อสเต็ป (USD)", "Aₙ สะสม (USD)",
               "Eₙ ส่วนเกินสะสม (USD)"]
+LEDGER_COLS = ["Rₙ อ้างอิง (USD)", "ΔAₙ ต่อสเต็ป (USD)", "Aₙ สะสม (USD)",
+               "Eₙ ส่วนเกินสะสม (USD)"]
+# คอลัมน์ที่ recompute ต้องมีครบ มิฉะนั้นไม่แตะ (fail safe)
+RECOMPUTE_REQUIRED = ["ราคา Pₙ (USD)", "สถานะ", "DNA step", "มูลค่าพอร์ต (USD)",
+                      "ส่วนต่างเป้าหมาย (USD)"] + LEDGER_COLS
+# คอลัมน์ตัดสินใจที่ทำให้ตัดสิน act/pass ได้เข้มตามนโยบาย
+POLICY_COLS = ["สถานะ", "DNA signal", "จำนวนสั่ง (หุ้น)"]
 
 PASS_DNA_ZERO = "PASS_DNA_ZERO"
 PASS_THRESHOLD = "PASS_THRESHOLD"
@@ -116,6 +129,79 @@ def _max_abs(s: pd.Series) -> float:
     return 0.0 if s.empty else float(s.abs().max())
 
 
+def has_policy_columns(df: pd.DataFrame) -> bool:
+    """ตัดสิน act/pass แบบเข้มได้ก็ต่อเมื่อมีคอลัมน์ตัดสินใจครบทั้งสาม"""
+    return all(col in df.columns for col in POLICY_COLS)
+
+
+def _traded_flags(df: pd.DataFrame) -> list[bool]:
+    """act = เทรดจริงเท่านั้น: signal = 1 **และ** READY_BUY/READY_SELL **และ** qty > 0
+
+    signal 0, PASS ทุกชนิด (รวม PASS_THRESHOLD ที่ signal=1 แต่ |gap| ≤ DIFF), สถานะแปลก
+    และแถว READY ที่ผิดรูป (qty = 0 หรือ signal = 0) ล้วนเป็น pass ต้องแช่แข็ง ledger
+    frame เก่าที่ไม่มีคอลัมน์ตัดสินใจครบ -> ถอยไปดูสถานะอย่างเดียว (พฤติกรรมรุ่นก่อน)
+    """
+    ready = df["สถานะ"].astype(str).isin([READY_BUY, READY_SELL])
+    if not has_policy_columns(df):
+        return ready.tolist()
+    return (ready
+            & df["DNA signal"].astype(int).eq(1)
+            & df["จำนวนสั่ง (หุ้น)"].astype(float).gt(0)).tolist()
+
+
+def _gated_flags(df: pd.DataFrame) -> list[bool]:
+    """แถวไหนอยู่ใต้ semantics gated_theoretical_v2 (แถวเก่าห้ามคำนวณด้วยสมการนี้)"""
+    if "semantics" not in df.columns:
+        return [True] * len(df)
+    return df["semantics"].astype(str).eq(GATED_SEMANTICS).tolist()
+
+
+def _reference_context(df: pd.DataFrame, p0: float | None) -> tuple[float, float] | None:
+    """หา (P₀, FIX_C) สำหรับเส้นอ้างอิง โดยไม่พึ่งสถานะการเทรดเลย"""
+    required = {"ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)"}
+    if df.empty or not required.issubset(df.columns):
+        return None
+
+    resolved_p0 = p0
+    if resolved_p0 is None and "DNA step" in df.columns:
+        try:
+            if int(df["DNA step"].iloc[0]) == 0:
+                resolved_p0 = float(df["ราคา Pₙ (USD)"].iloc[0])
+        except (TypeError, ValueError):
+            return None
+    if resolved_p0 is None:
+        return None
+
+    resolved_p0 = float(resolved_p0)
+    fix_c = float(df["มูลค่าพอร์ต (USD)"].astype(float).iloc[0]
+                  + df["ส่วนต่างเป้าหมาย (USD)"].astype(float).iloc[0])
+    if not np.isfinite(resolved_p0) or resolved_p0 <= 0:
+        return None
+    if not np.isfinite(fix_c):
+        return None
+    return resolved_p0, fix_c
+
+
+def _apply_reference_column(out: pd.DataFrame, source: pd.DataFrame,
+                            p0: float | None) -> pd.DataFrame:
+    """Rₙ คือเส้นอ้างอิงตลาด จึงต้องขยับทั้งแถว act และแถว pass ที่แช่แข็ง"""
+    if "Rₙ อ้างอิง (USD)" not in out.columns:
+        return out
+    context = _reference_context(source, p0)
+    if context is None:
+        return out
+
+    resolved_p0, fix_c = context
+    prices = source["ราคา Pₙ (USD)"].astype(float)
+    if bool((~np.isfinite(prices) | prices.le(0)).any()):
+        return out
+
+    reference = fix_c * np.log(prices / resolved_p0)
+    gated = pd.Series(_gated_flags(source), index=source.index)
+    out.loc[gated.to_numpy(), "Rₙ อ้างอิง (USD)"] = reference.loc[gated].to_numpy()
+    return out
+
+
 def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
                      tol: float = 1e-6) -> tuple[pd.DataFrame, bool]:
     """ตรวจสมการ LEGO กับแถว committed ของ chain เดียว (เรียง version แล้ว)
@@ -126,10 +212,10 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
       E1  FIX_C คงที่:   Vₙ + gapₙ = FIX_C ทุกแถว   (นิยาม gap = FIX_C − Vₙ)
       E2  มูลค่าพอร์ต:    Vₙ = holdingsₙ × Pₙ
       E3  อ้างอิง:        Rₙ = FIX_C × ln(Pₙ / P₀)
-      E4  ต่อสเต็ป (gated): act (เทรดจริง READY_BUY/READY_SELL) ->
+      E4  ต่อสเต็ป (gated): act (signal=1 + READY + qty>0) ->
                          ΔAₙ = FIX_C × (Pₙ / P_acted − 1)
                          โดย P_acted = ราคาแถว act ล่าสุด (reconstruct จาก decision series)
-                         pass (ไม่เทรด PASS_DNA_ZERO/PASS_THRESHOLD) -> ΔAₙ = 0 (แช่แข็ง)
+                         pass (ทุกกรณีอื่น) -> ΔAₙ = 0 (แช่แข็ง)
                          แถว semantics เก่า (legacy/cycle_realized_v1) -> ข้ามพร้อมหมายเหตุ
       E5  สะสม:          Aₙ = Aₙ₋₁ + ΔAₙ — ข้ามเฉพาะรอยต่อเปลี่ยน semantics
                          (baseline Aₙ รีเซ็ตเป็น 0)
@@ -137,8 +223,7 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
                          pass -> Eₙ = Aₙ − FIX_C × ln(P_acted / P₀)
       E7  โครงสร้าง:      step เพิ่มตาม market slot (มี market_ordinal -> Δstep = Δordinal ≥ 1;
                          ไม่มี -> step +1 แบบเดิม), version +1 ทุกแถว, signal ∈ {0,1}
-      E8  decision:      signal=0 -> PASS_DNA_ZERO ; READY_BUY -> gap>0, qty>0 ;
-                         READY_SELL -> gap<0, qty>0 ; PASS_* -> qty=0
+      E8  decision:      signal=1 + READY + qty>0 เท่านั้นที่เทรด; ทุกกรณีอื่นแช่แข็ง
     """
     p = df["ราคา Pₙ (USD)"].astype(float)
     h = df["จำนวนถือครอง (หุ้น)"].astype(float)
@@ -152,9 +237,7 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     sig = df["DNA signal"].astype(int)
     qty = df["จำนวนสั่ง (หุ้น)"].astype(float)
     status = df["สถานะ"].astype(str)
-    # act = "เทรดจริง" (READY_BUY/READY_SELL) เท่านั้น — ทุก PASS (รวม PASS_THRESHOLD
-    # ที่ signal=1 แต่ |gap| ≤ DIFF) ถือเป็น pass ต้องแช่แข็ง ledger (ไม่คีย์ที่ DNA signal)
-    traded = status.isin([READY_BUY, READY_SELL]).tolist()
+    traded = _traded_flags(df)
 
     fixc_series = v + gap
     fix_c = float(fixc_series.iloc[0])
@@ -183,13 +266,10 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
         add("E3", "Rₙ = FIX_C × ln(Pₙ/P₀)", None, True, "ข้าม — ไม่รู้ P₀ (ไม่มีแถว genesis/state)")
 
     # แถว semantics เก่า (legacy price-formula / cycle_realized_v1): ตรวจสมการ gated ไม่ได้
-    if "semantics" in df.columns:
-        gated = (df["semantics"].astype(str) == GATED_SEMANTICS).tolist()
-    else:
-        gated = [False] * len(df)
+    gated = _gated_flags(df) if "semantics" in df.columns else [False] * len(df)
 
     # reconstruct P_acted (ราคาแถว act ล่าสุด) จาก decision series:
-    # act (เทรดจริง READY_BUY/READY_SELL) -> เลื่อนเป็น Pₙ ; pass (จำนวนสั่ง=0) -> แช่แข็ง
+    # act -> เลื่อนเป็น Pₙ ; pass -> แช่แข็ง
     # prev_acted[i] = P_acted "ก่อน" แถว i (None = ยังไม่รู้ เช่นตัดหน้า chain มา)
     n = len(df)
     prev_acted: list[float | None] = [None] * n
@@ -201,7 +281,7 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
         elif not gated[i]:
             acted = float(p.iloc[i])            # semantics เก่า: pointer เลื่อนทุกแถว
         elif traded[i]:
-            acted = float(p.iloc[i])            # act เฉพาะแถวที่เทรดจริง (READY_BUY/SELL)
+            acted = float(p.iloc[i])            # act เฉพาะแถวที่เทรดจริง
 
     resid4, skip4 = [], 0
     resid6, skip6 = [], 0
@@ -274,12 +354,15 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     add("E7", "step ตาม market slot / version +1 / signal ∈ {0,1}", None, ok7,
         note_step if ok7 else "ลำดับ step/version ขาด หรือ signal นอก {0,1}")
 
-    bad = 0
-    bad += int(((sig == 0) & ((status != PASS_DNA_ZERO) | (qty != 0))).sum())
-    bad += int(((status == READY_BUY) & ~((gap > 0) & (qty > 0))).sum())
-    bad += int(((status == READY_SELL) & ~((gap < 0) & (qty > 0))).sum())
-    bad += int((status.isin([PASS_DNA_ZERO, PASS_THRESHOLD]) & (qty != 0)).sum())
-    add("E8", "gate/decision สอดคล้องสถานะ", None, bad == 0,
+    # E8 ใช้กฎเดียวกับ ledger: READY ที่ signal=0 หรือ qty=0 คือแถวผิด ไม่ใช่แถว act
+    ready_buy = status.eq(READY_BUY)
+    ready_sell = status.eq(READY_SELL)
+    ready = ready_buy | ready_sell
+    valid_trade = ((ready_buy & sig.eq(1) & gap.gt(0) & qty.gt(0))
+                   | (ready_sell & sig.eq(1) & gap.lt(0) & qty.gt(0)))
+    valid_frozen = ~ready & qty.eq(0)
+    bad = int((~(valid_trade | valid_frozen)).sum())
+    add("E8", "signal=1 + READY + qty>0 เท่านั้นที่เทรด; ทุกกรณีอื่นแช่แข็ง", None, bad == 0,
         "" if bad == 0 else f"ผิด {bad} แถว")
 
     report = pd.DataFrame(checks, columns=["ข้อ", "สมการ/กฎ", "residual สูงสุด", "ผ่าน", "หมายเหตุ"])
@@ -288,38 +371,38 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
 
 def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None) -> pd.DataFrame:
     """คำนวณคอลัมน์ recurrence (Rₙ, ΔAₙ, Aₙ, Eₙ) ใหม่จาก input ที่เชื่อถือได้
-    (ราคา Pₙ + การตัดสินใจ traded + P₀) ตามหลักการ "บัญชีแบบแช่แข็ง"
+    (ราคา Pₙ + การตัดสินใจ + P₀) ตามหลักการ "บัญชีแบบแช่แข็ง"
 
     ใช้เพราะ dashboard เป็น read-only: ถ้า engine เขียน recurrence ผิด (เช่นแถว PASS
     ที่ยัง act, ΔAₙ ≠ 0) เราจะ "ไม่เชื่อ" ค่าที่เก็บมา แต่ derive ใหม่จากราคา+การตัดสินใจ
-    เพื่อให้ตาราง/กราฟที่ "แสดง" ถูกต้องตามหลักการเสมอ (PASS ทุกชนิดต้องแช่แข็ง)
+    เพื่อให้ตาราง/กราฟที่ "แสดง" ถูกต้องตามหลักการเสมอ
 
-    act (READY_BUY/READY_SELL, เทรดจริง): ΔAₙ = FIX_C×(Pₙ/P_acted−1), เลื่อน P_acted=Pₙ,
-        Eₙ = Aₙ − Rₙ
-    pass (จำนวนสั่ง=0 — PASS_DNA_ZERO หรือ PASS_THRESHOLD): ΔAₙ = 0, Aₙ ค้าง,
-        P_acted แช่แข็ง, Eₙ = Aₙ − FIX_C×ln(P_acted/P₀)
+    act (signal=1 + READY_BUY/READY_SELL + qty>0): ΔAₙ = FIX_C×(Pₙ/P_acted−1),
+        เลื่อน P_acted = Pₙ, Eₙ = Aₙ − Rₙ
+    pass (ทุกกรณีอื่น): ΔAₙ = 0, Aₙ ค้าง, P_acted แช่แข็ง, Eₙ = Aₙ − FIX_C×ln(P_acted/P₀)
     แถว semantics เก่า (legacy/cycle_realized_v1) -> คงค่าเดิม (ไม่แตะ)
 
+    Rₙ ไม่เคยแช่แข็ง: recompute จากราคาตลาดทุกแถว gated ไม่ว่า act หรือ pass
     เป็น no-op กับ chain ที่ค่าถูกอยู่แล้ว (residual 0) จึงปลอดภัยจะเรียกก่อนแสดงผลเสมอ
+    คอลัมน์ตัดสินใจไม่ถูกเขียนทับ — dashboard ห้ามแก้หลักฐานที่ commit ไปแล้ว
     """
-    required = ["ราคา Pₙ (USD)", "สถานะ", "DNA step", "มูลค่าพอร์ต (USD)",
-                "ส่วนต่างเป้าหมาย (USD)", "Rₙ อ้างอิง (USD)", "ΔAₙ ต่อสเต็ป (USD)",
-                "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]
-    if df.empty or any(c not in df.columns for c in required):
-        return df                                     # fail safe: ไม่ครบคอลัมน์ -> ไม่แตะ
-    out = df.reset_index(drop=True).copy()
+    if df.empty or any(c not in df.columns for c in RECOMPUTE_REQUIRED):
+        # fail safe: ไม่ครบคอลัมน์ -> ไม่คำนวณ ledger เลย
+        # คืน copy เสมอ: dashboard เป็น read-only จึงห้ามเขียนทับ frame ของผู้เรียก
+        return _apply_reference_column(df.copy(), df, p0)
+
+    source = df.reset_index(drop=True)
+    out = source.copy()
     p = out["ราคา Pₙ (USD)"].astype(float)
     fix_c = float((out["มูลค่าพอร์ต (USD)"].astype(float)
                    + out["ส่วนต่างเป้าหมาย (USD)"].astype(float)).iloc[0])
     step = out["DNA step"].astype(int)
-    status = out["สถานะ"].astype(str)
     genesis = bool(step.iloc[0] == 0)
     if p0 is None and genesis:
         p0 = float(p.iloc[0])                          # แถว genesis: P₀ = ราคาแถวแรก
     can_ref = p0 is not None and p0 > 0
-    gated = ((out["semantics"].astype(str) == GATED_SEMANTICS).tolist()
-             if "semantics" in out.columns else [True] * len(out))
-    traded = status.isin([READY_BUY, READY_SELL]).tolist()
+    gated = _gated_flags(out)
+    traded = _traded_flags(out)
 
     R = out["Rₙ อ้างอิง (USD)"].astype(float).tolist()
     dA = out["ΔAₙ ต่อสเต็ป (USD)"].astype(float).tolist()
@@ -349,7 +432,7 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None) -> pd.Data
             A_prev += d
             dA[i], A[i], E[i] = d, A_prev, A_prev - R[i]
             acted = Pi
-        else:                                         # pass: แช่แข็ง (ทุก PASS รวม signal=1)
+        else:                                         # pass: แช่แข็ง
             dA[i], A[i] = 0.0, A_prev
             if can_ref:
                 E[i] = A_prev - fix_c * math.log(acted / p0)
@@ -358,19 +441,21 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None) -> pd.Data
     out["ΔAₙ ต่อสเต็ป (USD)"] = dA
     out["Aₙ สะสม (USD)"] = A
     out["Eₙ ส่วนเกินสะสม (USD)"] = E
-    return out
+    return _apply_reference_column(out, source, p0)
 
 
 def count_ledger_corrections(stored: pd.DataFrame, fixed: pd.DataFrame,
                              tol: float = 1e-6) -> int:
     """นับแถวที่ recompute_gated_ledger แก้ค่า recurrence (stored ≠ fixed)
-    ใช้เตือนบน dashboard ว่า engine เขียน ledger ผิดกี่แถว (ควรไปแก้ engine ต้นทาง)"""
-    cols = ["ΔAₙ ต่อสเต็ป (USD)", "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]
+
+    รวม Rₙ ด้วย เพราะ Rₙ ต้องไม่เคยถูกแช่แข็ง — engine ที่เขียน Rₙ ค้างไว้ก็คือแถวที่ผิด
+    ใช้เตือนบน dashboard ว่า engine เขียน ledger ผิดกี่แถว (ควรไปแก้ engine ต้นทาง)
+    """
     if stored.empty or any(c not in stored.columns or c not in fixed.columns
-                           for c in cols):
+                           for c in LEDGER_COLS):
         return 0
-    a = stored.reset_index(drop=True)[cols].astype(float)
-    b = fixed.reset_index(drop=True)[cols].astype(float)
+    a = stored.reset_index(drop=True)[LEDGER_COLS].astype(float)
+    b = fixed.reset_index(drop=True)[LEDGER_COLS].astype(float)
     return int(((a - b).abs().max(axis=1) > tol).sum())
 
 

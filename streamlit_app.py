@@ -76,14 +76,16 @@ def render_live_dashboard() -> None:
 
     # เลือก chain ก่อน — กัน step ซ้ำข้าม chain ปนกราฟ
     chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df else []
-    selected = chains[0] if chains else None
     if len(chains) > 1:
         # default = chain ที่ active ล่าสุดตาม state.updated_at (ไม่ใช่เรียงอักษร)
         selected = st.selectbox("Chain", chains,
                                 index=default_chain_index(chains, state))
         df = df[df["chain_key"] == selected]
     elif chains:
+        selected = chains[0]
         st.caption(f"Chain: {chains[0]}")
+    else:
+        selected = None
 
     # P₀ จาก state pointer (chain ตัดหน้า) — genesis จะ fallback = ราคาแถวแรกใน recompute
     p0_hint = None
