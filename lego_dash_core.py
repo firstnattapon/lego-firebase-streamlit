@@ -35,7 +35,8 @@ COLUMN_ORDER = [
     "Aₙ สะสม (USD)",          # 16
     "Eₙ ส่วนเกินสะสม (USD)",  # 17
 ]
-META_COLS = ["run_id", "chain_key", "version", "committed", "semantics"]
+META_COLS = ["run_id", "chain_key", "version", "committed", "semantics",
+             "market_slot_id", "market_ordinal", "clock_mode"]
 
 # mirror ของ lego_state.CASHFLOW_SEMANTICS — ledger ทฤษฎีแบบ gated (ตาม gated demo):
 #   ledger คีย์ที่ "เทรดจริงหรือไม่" (การตัดสินใจ) ไม่ใช่ DNA signal ดิบ:
@@ -134,7 +135,8 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
                          (baseline Aₙ รีเซ็ตเป็น 0)
       E6  ส่วนเกิน (smooth): act -> Eₙ = Aₙ − Rₙ ;
                          pass -> Eₙ = Aₙ − FIX_C × ln(P_acted / P₀)
-      E7  โครงสร้าง:      step +1 ทุกแถว, version +1 ทุกแถว, signal ∈ {0,1}
+      E7  โครงสร้าง:      step เพิ่มตาม market slot (มี market_ordinal -> Δstep = Δordinal ≥ 1;
+                         ไม่มี -> step +1 แบบเดิม), version +1 ทุกแถว, signal ∈ {0,1}
       E8  decision:      signal=0 -> PASS_DNA_ZERO ; READY_BUY -> gap>0, qty>0 ;
                          READY_SELL -> gap<0, qty>0 ; PASS_* -> qty=0
     """
@@ -251,14 +253,26 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     add("E6", "smooth: act Eₙ = Aₙ − Rₙ ; pass Eₙ = Aₙ − FIX_C × ln(P_acted/P₀)",
         r6, r6 <= scale, note6)
 
-    ok_step = bool((step.diff().iloc[1:] == 1).all()) if len(df) > 1 else True
+    # DNA เดินตาม market slot: ปกติ scheduler ไม่พลาด -> step +1 เหมือนเดิมทุกประการ
+    # แต่ถ้าพลาด slot step ต้องกระโดดเท่ากับ market_ordinal ที่ข้ามไป (ห้ามย้อน/ซ้ำ)
+    ok_step, note_step = True, ""
+    if len(df) > 1:
+        step_delta = step.diff().iloc[1:]
+        if "market_ordinal" in df.columns and df["market_ordinal"].notna().all():
+            slot_delta = df["market_ordinal"].astype(int).diff().iloc[1:]
+            ok_step = bool((step_delta == slot_delta).all() and (slot_delta >= 1).all())
+            skipped = int((slot_delta > 1).sum())
+            if ok_step and skipped:
+                note_step = f"ข้าม {skipped} ช่วง (scheduler พลาด slot — DNA เดินตามเวลาตลาด)"
+        else:
+            ok_step = bool((step_delta == 1).all())   # แถวเก่าที่ไม่มี slot provenance
     ok_ver = True
     if "version" in df.columns and len(df) > 1:
         ok_ver = bool((df["version"].astype(int).diff().iloc[1:] == 1).all())
     ok_sig = bool(sig.isin([0, 1]).all())
-    add("E7", "step +1 / version +1 / signal ∈ {0,1}", None,
-        ok_step and ok_ver and ok_sig,
-        "" if (ok_step and ok_ver and ok_sig) else "ลำดับ step/version ขาด หรือ signal นอก {0,1}")
+    ok7 = ok_step and ok_ver and ok_sig
+    add("E7", "step ตาม market slot / version +1 / signal ∈ {0,1}", None, ok7,
+        note_step if ok7 else "ลำดับ step/version ขาด หรือ signal นอก {0,1}")
 
     bad = 0
     bad += int(((sig == 0) & ((status != PASS_DNA_ZERO) | (qty != 0))).sum())

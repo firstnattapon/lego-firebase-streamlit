@@ -495,6 +495,49 @@ def test_simulate_prices_deterministic_and_positive():
     assert a != c                                              # seed ต่าง -> เส้นต่าง
 
 
+def _with_slots(steps: list[int], ordinals: list[int] | None) -> dict:
+    """chain เดิม แต่ให้ DNA step / market_ordinal ตามที่กำหนด (จำลอง scheduler พลาด slot)"""
+    data = _mk_chain(PRICES, HOLD, SIGNALS)
+    for i, key in enumerate(sorted(data, key=lambda k: data[k]["version"])):
+        data[key]["DNA step"] = steps[i]
+        if ordinals is not None:
+            data[key]["market_ordinal"] = ordinals[i]
+            data[key]["market_slot_id"] = f"2026-07-17:{ordinals[i]}"
+            data[key]["clock_mode"] = "market"
+    return data
+
+
+def test_e7_accepts_step_jump_that_matches_market_slot():
+    # scheduler พลาด slot 2: step ต้องกระโดดตาม ordinal ไม่ใช่ +1
+    df = rows_to_df(_with_slots([0, 1, 3, 4, 5], [0, 1, 3, 4, 5]))
+    report, ok = integrity_report(df, p0_hint=10.0)
+    assert ok, f"step ที่ตรง market slot ต้องผ่าน:\n{report}"
+    assert "ข้าม 1 ช่วง" in report.loc[report["ข้อ"] == "E7", "หมายเหตุ"].iloc[0]
+
+
+def test_e7_rejects_step_out_of_sync_with_market_slot():
+    df = rows_to_df(_with_slots([0, 1, 2, 3, 4], [0, 1, 3, 4, 5]))
+    report, ok = integrity_report(df, p0_hint=10.0)
+    assert not ok, f"step ไม่ตรง market slot ต้องจับได้:\n{report}"
+
+
+def test_e7_rejects_repeated_market_slot():
+    df = rows_to_df(_with_slots([0, 1, 1, 2, 3], [0, 1, 1, 2, 3]))
+    _, ok = integrity_report(df, p0_hint=10.0)
+    assert not ok
+
+
+def test_e7_keeps_plus_one_rule_for_rows_without_slot_provenance():
+    assert integrity_report(rows_to_df(_with_slots([0, 1, 2, 3, 4], None)), p0_hint=10.0)[1]
+    assert not integrity_report(rows_to_df(_with_slots([0, 1, 3, 4, 5], None)), p0_hint=10.0)[1]
+
+
+def test_order_columns_keeps_slot_provenance_after_the_17():
+    df = order_columns(rows_to_df(_with_slots([0, 1, 3, 4, 5], [0, 1, 3, 4, 5])))
+    assert list(df.columns)[:17] == COLUMN_ORDER
+    assert "market_ordinal" in list(df.columns)[17:]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
